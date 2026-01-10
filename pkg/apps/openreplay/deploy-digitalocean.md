@@ -70,7 +70,7 @@ certificate.crt={opts.SSLCertificateCrt}
 
 ```
 
-2.  If you’re bringing your own certificate, create an SSL secret using the following command: `kubectl create secret tls openreplay-ssl -n app --key="private_key_file.pem" --cert="certificate.crt"`.
+2.  If you’re bringing your own certificate, create an SSL secret using the following command: :sh[private_key_file.pem={config.PrivateKeyFile}]`kubectl create secret tls openreplay-ssl -n app --key="private_key_file.pem" --cert="certificate.crt"`.
 @
 
 @sh(ssl=true)

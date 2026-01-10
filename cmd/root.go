@@ -9,6 +9,7 @@ import (
 
 	"github.com/zdunecki/selfhosted/pkg/apps"
 	"github.com/zdunecki/selfhosted/pkg/apps/dsl"
+	"github.com/zdunecki/selfhosted/pkg/cli"
 	"github.com/zdunecki/selfhosted/pkg/providers"
 )
 
@@ -31,22 +32,6 @@ var (
 	dnsSetupMode           string
 )
 
-type deployOptions struct {
-	ProviderName           string
-	AppName                string
-	Region                 string
-	Size                   string
-	Domain                 string
-	DeployName             string
-	SSHKeyPath             string
-	SSHPubKey              string
-	EnableSSL              bool
-	Email                  string
-	SSLPrivateKeyFile      string
-	SSLCertificateCrt      string
-	HttpToHttpsRedirection bool
-	DNSSetupMode           string
-}
 
 var rootCmd = &cobra.Command{
 	Use:   "selfhost",
@@ -207,13 +192,13 @@ func init() {
 
 func Execute() error {
 	if len(os.Args) == 1 {
-		return runWizard()
+		return cli.RunWizard(DeployWithOptions)
 	}
 	return rootCmd.Execute()
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	opts := deployOptions{
+	opts := cli.DeployOptions{
 		ProviderName:           providerName,
 		AppName:                appName,
 		Region:                 region,
@@ -229,10 +214,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		HttpToHttpsRedirection: httpToHttpsRedirection,
 		DNSSetupMode:           dnsSetupMode,
 	}
-	return deployWithOptions(opts)
+	return DeployWithOptions(opts)
 }
 
-func deployWithOptions(opts deployOptions) error {
+// DeployWithOptions executes a deployment with the given options
+func DeployWithOptions(opts cli.DeployOptions) error {
 	// Get provider
 	provider, err := providers.Get(opts.ProviderName)
 	if err != nil {

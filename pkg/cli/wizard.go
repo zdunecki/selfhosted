@@ -1,4 +1,4 @@
-package cmd
+package cli
 
 import (
 	"fmt"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/zdunecki/selfhosted/pkg/apps"
 	"github.com/zdunecki/selfhosted/pkg/providers"
+	"github.com/zdunecki/selfhosted/pkg/utils"
 )
 
 type wizardStep int
@@ -46,7 +47,7 @@ type wizardModel struct {
 	step          wizardStep
 	list          list.Model
 	input         textinput.Model
-	opts          deployOptions
+	opts          DeployOptions
 	validationErr string
 	cancelled     bool
 	err           error
@@ -63,7 +64,8 @@ var (
 	styleHighlight = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
 )
 
-func runWizard() error {
+// RunWizard runs the interactive deployment wizard
+func RunWizard(deployFunc func(DeployOptions) error) error {
 	model := newWizardModel()
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 	result, err := prog.Run()
@@ -84,7 +86,7 @@ func runWizard() error {
 	if finalModel.opts.ProviderName == "" {
 		return nil
 	}
-	return deployWithOptions(finalModel.opts)
+	return deployFunc(finalModel.opts)
 }
 
 func newWizardModel() wizardModel {
@@ -422,10 +424,10 @@ func yesNoItems() []list.Item {
 }
 
 func dnsSetupItems(domain string) []list.Item {
-	info := detectDNSProvider(domain)
+	info := utils.DetectDNSProvider(domain)
 	recommended := "unknown"
 	if info.Name != "" {
-		recommended = info.Name
+		recommended = string(info.Name)
 	}
 
 	return []list.Item{
