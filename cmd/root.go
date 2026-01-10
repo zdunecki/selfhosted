@@ -6,9 +6,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/zdunecki/selfhosted/pkg/dns"
+	"github.com/zdunecki/selfhosted/pkg/dsl"
 
 	"github.com/zdunecki/selfhosted/pkg/apps"
-	"github.com/zdunecki/selfhosted/pkg/apps/dsl"
 	"github.com/zdunecki/selfhosted/pkg/cli"
 	"github.com/zdunecki/selfhosted/pkg/providers"
 )
@@ -31,7 +32,6 @@ var (
 	configFile             string
 	dnsSetupMode           string
 )
-
 
 var rootCmd = &cobra.Command{
 	Use:   "selfhost",
@@ -192,7 +192,7 @@ func init() {
 
 func Execute() error {
 	if len(os.Args) == 1 {
-		return cli.RunWizard(DeployWithOptions)
+		return cli.RunWizard(deployWithOptions)
 	}
 	return rootCmd.Execute()
 }
@@ -214,11 +214,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		HttpToHttpsRedirection: httpToHttpsRedirection,
 		DNSSetupMode:           dnsSetupMode,
 	}
-	return DeployWithOptions(opts)
+	return deployWithOptions(opts)
 }
 
-// DeployWithOptions executes a deployment with the given options
-func DeployWithOptions(opts cli.DeployOptions) error {
+// deployWithOptions executes a deployment with the given options
+func deployWithOptions(opts cli.DeployOptions) error {
 	// Get provider
 	provider, err := providers.Get(opts.ProviderName)
 	if err != nil {
@@ -290,13 +290,46 @@ func DeployWithOptions(opts cli.DeployOptions) error {
 	fmt.Printf("✅ Server ready with IP: %s\n", server.IP)
 
 	// Step 3: Setup DNS
-	if shouldSetupDNS(opts, provider.Name()) {
-		fmt.Println("⏳ Setting up DNS...")
-		err = provider.SetupDNS(opts.Domain, server.IP)
-		if err != nil {
-			fmt.Printf("⚠️  DNS setup failed (manual setup may be needed): %v\n", err)
+	detectedDNS := dns.DetectDNSProvider(opts.Domain)
+	detectedProvider := string(detectedDNS.Name)
+
+	if apps.ShouldSetupDNS(app, opts.DNSSetupMode, provider.Name(), detectedProvider) {
+		if opts.DNSSetupMode == "cloudflare" && opts.CloudflareZoneName != "" {
+			fmt.Println("⏳ Setting up Cloudflare DNS...")
+
+			// Use custom token if provided, otherwise try env var
+			var cfProvider *dns.CloudflareProvider
+			var err error
+			if opts.CloudflareToken != "" {
+				cfProvider, err = dns.NewCloudflareProviderWithToken(opts.CloudflareToken)
+			} else {
+				cfProvider, err = dns.NewCloudflareProvider()
+			}
+
+			if err != nil {
+				fmt.Printf("⚠️  Could not initialize Cloudflare provider: %v\n", err)
+				fmt.Println("ℹ️  Please configure DNS manually at your Cloudflare dashboard")
+			} else {
+				err = cfProvider.SetupDNS(opts.Domain, server.IP, opts.CloudflareProxied)
+				if err != nil {
+					fmt.Printf("⚠️  Cloudflare DNS setup failed: %v\n", err)
+					fmt.Println("ℹ️  Please configure DNS manually at your Cloudflare dashboard")
+				} else {
+					if opts.CloudflareProxied {
+						fmt.Println("✅ DNS configured with Cloudflare proxy enabled")
+					} else {
+						fmt.Println("✅ DNS configured (DNS only mode)")
+					}
+				}
+			}
 		} else {
-			fmt.Println("✅ DNS configured")
+			// Try provider's native DNS setup
+			err = provider.SetupDNS(opts.Domain, server.IP)
+			if err != nil {
+				fmt.Printf("⚠️  DNS setup failed (manual setup may be needed): %v\n", err)
+			} else {
+				fmt.Println("✅ DNS configured")
+			}
 		}
 	} else {
 		fmt.Println("ℹ️  Skipping DNS setup. Configure DNS at your provider.")

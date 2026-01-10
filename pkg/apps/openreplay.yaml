@@ -15,6 +15,7 @@ providers:
 
 steps:
   - name: Install on machine
+    in: machine
     run: |
       cloud-init status --wait || true
       apt-get update -y
@@ -24,11 +25,13 @@ steps:
       openreplay -i {opts.Domain}
 
   - name: Verify status
+    in: machine
     log: "Checking OpenReplay status"
     run: |
       openreplay -s || true
 
   - name: Own SSL
+    in: machine
     if: opts.SSLPrivateKeyFile || opts.SSLCertificateCrt
     run: |
       kubectl \
@@ -39,6 +42,7 @@ steps:
 
   - name: SSL
     if: opts.SSL
+    in: machine
     sleep: 30s
     run: |
       cat >> /var/lib/openreplay/vars.yaml << 'EOF'
@@ -63,5 +67,6 @@ steps:
   #     cat /var/lib/openreplay/vars.yaml | comment 'ingress-nginx'
 
   - name: Restart
+    in: machine
     run: |
       openreplay -R

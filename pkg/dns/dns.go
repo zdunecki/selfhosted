@@ -1,10 +1,9 @@
-package utils
+package dns
 
 import (
 	"fmt"
 	"strings"
 )
-
 
 // GetDNSCheckCommand returns the shell command to verify DNS configuration
 func GetDNSCheckCommand(domain, expectedIP string) string {

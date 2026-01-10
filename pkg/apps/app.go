@@ -2,6 +2,7 @@ package apps
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/zdunecki/selfhosted/pkg/providers"
 )
@@ -28,6 +29,11 @@ type App interface {
 
 	// DomainHint returns a suggested domain format for the app
 	DomainHint() string
+
+	// ShouldSetupDNS returns whether DNS should be configured by the provider
+	// Parameters: dnsSetupMode ("auto", "skip", "force"), providerName, detectedDNSProvider
+	// Returns: true if DNS should be set up, false otherwise
+	ShouldSetupDNS(dnsSetupMode, providerName, detectedDNSProvider string) bool
 }
 
 // InstallConfig holds installation configuration
@@ -60,4 +66,26 @@ func Get(name string) (App, error) {
 		return nil, fmt.Errorf("unknown app: %s", name)
 	}
 	return a, nil
+}
+
+// ShouldSetupDNS is a helper function that handles the generic DNS setup mode logic
+// and delegates to the app-specific logic when needed
+func ShouldSetupDNS(app App, dnsSetupMode, providerName, detectedDNSProvider string) bool {
+	mode := strings.ToLower(strings.TrimSpace(dnsSetupMode))
+	if mode == "" {
+		mode = "auto"
+	}
+
+	// Force skip if explicitly requested
+	if mode == "skip" {
+		return false
+	}
+
+	// Force setup if explicitly requested (includes "cloudflare" mode)
+	if mode == "force" || mode == "cloudflare" {
+		return true
+	}
+
+	// Auto mode: delegate to app-specific logic
+	return app.ShouldSetupDNS(mode, providerName, detectedDNSProvider)
 }

@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zdunecki/selfhosted/pkg/apps/dsl"
+	"github.com/zdunecki/selfhosted/pkg/dsl"
 	"github.com/zdunecki/selfhosted/pkg/providers"
 	"github.com/zdunecki/selfhosted/pkg/utils"
 )
 
-//go:embed openreplay/selfhosted.yaml
+//go:embed openreplay.yaml
 var openReplayDSLData []byte
 
 type OpenReplayDSL struct {
@@ -118,4 +118,18 @@ func (o *OpenReplayDSL) PrintSummary(ip, domain string) {
 	fmt.Printf("🔗 OpenReplay URL: https://%s\n", domain)
 	fmt.Printf("📝 Signup URL: https://%s/signup\n", domain)
 	fmt.Println(strings.Repeat("═", 70))
+}
+
+func (o *OpenReplayDSL) ShouldSetupDNS(dnsSetupMode, providerName, detectedDNSProvider string) bool {
+	// OpenReplay-specific logic:
+	// Skip DNS setup if provider is DigitalOcean but DNS is managed elsewhere (e.g., Cloudflare)
+	// This avoids conflicts when users want to use their existing DNS provider
+	if strings.ToLower(providerName) == "digitalocean" &&
+		detectedDNSProvider != "" &&
+		strings.ToLower(detectedDNSProvider) != "digitalocean" {
+		return false
+	}
+
+	// Default: setup DNS
+	return true
 }

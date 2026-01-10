@@ -16,4 +16,7 @@ type DeployOptions struct {
 	SSLCertificateCrt      string
 	HttpToHttpsRedirection bool
 	DNSSetupMode           string
+	CloudflareToken        string // Cloudflare API token (if provided by user)
+	CloudflareZoneName     string // Cloudflare zone name if using Cloudflare DNS
+	CloudflareProxied      bool   // Whether to enable Cloudflare proxy
 }

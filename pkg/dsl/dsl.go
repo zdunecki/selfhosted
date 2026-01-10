@@ -56,6 +56,7 @@ type SpecHW struct {
 
 type Step struct {
 	Name  string `yaml:"name"`
+	In    string `yaml:"In"` // Where to run the step (e.g., "machine")
 	If    string `yaml:"if"`
 	Run   string `yaml:"run"`
 	Sleep string `yaml:"sleep"`

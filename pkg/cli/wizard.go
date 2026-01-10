@@ -9,10 +9,10 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/zdunecki/selfhosted/pkg/dns"
 
 	"github.com/zdunecki/selfhosted/pkg/apps"
 	"github.com/zdunecki/selfhosted/pkg/providers"
-	"github.com/zdunecki/selfhosted/pkg/utils"
 )
 
 type wizardStep int
@@ -23,6 +23,10 @@ const (
 	stepRegion
 	stepSize
 	stepDomain
+	stepDNSProviderChoice
+	stepCloudflareTokenChoice
+	stepCloudflareTokenInput
+	stepCloudflareSetup
 	stepDNSSetup
 	stepSSL
 	stepEmail
@@ -44,15 +48,20 @@ func (i optionItem) Description() string { return i.desc }
 func (i optionItem) FilterValue() string { return i.title }
 
 type wizardModel struct {
-	step          wizardStep
-	list          list.Model
-	input         textinput.Model
-	opts          DeployOptions
-	validationErr string
-	cancelled     bool
-	err           error
-	width         int
-	height        int
+	step               wizardStep
+	list               list.Model
+	input              textinput.Model
+	opts               DeployOptions
+	validationErr      string
+	cancelled          bool
+	err                error
+	width              int
+	height             int
+	cloudflareToken    string              // Cloudflare API token
+	cloudflareTokenURL string              // Cached Cloudflare token creation URL
+	cloudflareZoneName string              // For Cloudflare setup flow
+	cloudflareProxied  bool                // User's proxy preference
+	detectedDNS        dns.DNSProviderInfo // Detected DNS provider from domain
 }
 
 var (
@@ -86,6 +95,10 @@ func RunWizard(deployFunc func(DeployOptions) error) error {
 	if finalModel.opts.ProviderName == "" {
 		return nil
 	}
+	// Pass Cloudflare settings to deploy options
+	finalModel.opts.CloudflareToken = finalModel.cloudflareToken
+	finalModel.opts.CloudflareZoneName = finalModel.cloudflareZoneName
+	finalModel.opts.CloudflareProxied = finalModel.cloudflareProxied
 	return deployFunc(finalModel.opts)
 }
 
@@ -123,7 +136,7 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.list.SetSize(msg.Width, msg.Height-4)
-		if m.step == stepDomain || m.step == stepEmail || m.step == stepSSHPrivate || m.step == stepSSHPublic {
+		if m.step == stepDomain || m.step == stepEmail || m.step == stepSSHPrivate || m.step == stepSSHPublic || m.step == stepDeployName || m.step == stepCloudflareTokenInput {
 			m.input.Width = msg.Width - 4
 		}
 	case tea.KeyMsg:
@@ -132,14 +145,14 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelled = true
 			return m, tea.Quit
 		case "enter":
-			if m.step != stepDomain && m.step != stepEmail && m.step != stepSSHPrivate && m.step != stepSSHPublic && m.step != stepDeployName {
+			if m.step != stepDomain && m.step != stepEmail && m.step != stepSSHPrivate && m.step != stepSSHPublic && m.step != stepDeployName && m.step != stepCloudflareTokenInput {
 				return m.handleSelection()
 			}
 		}
 	}
 
 	switch m.step {
-	case stepDomain, stepEmail, stepSSHPrivate, stepSSHPublic, stepDeployName:
+	case stepDomain, stepEmail, stepSSHPrivate, stepSSHPublic, stepDeployName, stepCloudflareTokenInput:
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyEnter {
@@ -166,6 +179,11 @@ func (m wizardModel) View() string {
 	switch m.step {
 	case stepDomain:
 		return header + styleSubtitle.Render("Enter the domain for the app:") + "\n" + styleSummary.Render(m.domainHint()) + "\n\n" + m.input.View() + "\n\n" + stylePrompt.Render("Press Enter to continue.")
+	case stepCloudflareTokenInput:
+		instructions := styleSubtitle.Render("Create a Cloudflare API token with 'Zone.DNS' permissions:") + "\n" +
+			styleSummary.Render(m.cloudflareTokenURL) + "\n\n" +
+			styleSubtitle.Render("Paste your API token below:")
+		return header + instructions + "\n\n" + m.input.View() + "\n\n" + stylePrompt.Render("Press Enter to continue.")
 	case stepEmail:
 		return header + styleSubtitle.Render("Enter email for SSL (required when SSL is enabled):") + "\n\n" + m.input.View() + "\n\n" + stylePrompt.Render("Press Enter to continue.")
 	case stepSSHPrivate:
@@ -220,8 +238,135 @@ func (m wizardModel) handleSelection() (tea.Model, tea.Cmd) {
 			m.opts.Size = item.value
 		}
 		m.setInput(stepDomain, "example.com")
+	case stepDNSProviderChoice:
+		if item.value == "cloudflare" {
+			// Try to create Cloudflare provider (checks for CLOUDFLARE_API_TOKEN)
+			cfProvider, err := dns.NewCloudflareProvider()
+			if err != nil {
+				// No CLOUDFLARE_API_TOKEN env var - show token choice menu
+				m.list = newList("Cloudflare API Token Required", cloudflareTokenChoiceItems())
+				m.applyListSize()
+				m.step = stepCloudflareTokenChoice
+			} else {
+				// Token found from env var, store it and proceed to Cloudflare setup
+				m.cloudflareToken = cfProvider.GetToken()
+				m.list = newList("Cloudflare DNS Setup", cloudflareSetupItems())
+				m.applyListSize()
+				m.step = stepCloudflareSetup
+			}
+		} else if item.value == "provider" {
+			// User chose provider's native DNS (DigitalOcean, etc.)
+			m.opts.DNSSetupMode = "force"
+			if m.opts.AppName == "openreplay" {
+				m.list = newList("DNS setup for OpenReplay", dnsSetupItems(m.opts.Domain))
+				m.applyListSize()
+				m.step = stepDNSSetup
+			} else {
+				m.list = newList("Enable SSL?", yesNoItems())
+				m.applyListSize()
+				m.step = stepSSL
+			}
+		} else if item.value == "skip" {
+			// User chose to skip DNS setup - go straight to SSL
+			m.opts.DNSSetupMode = "skip"
+			m.list = newList("Enable SSL?", yesNoItems())
+			m.applyListSize()
+			m.step = stepSSL
+		}
+	case stepCloudflareTokenChoice:
+		// Handle token choice - either enter token or skip
+		if item.value == "enter-token" || item.value == "create-token" {
+			// Cache the token URL once (to avoid calling wrangler on every keystroke)
+			if m.cloudflareTokenURL == "" {
+				m.cloudflareTokenURL = dns.GetTokenCreationURL()
+			}
+			// Show text input for token
+			m.setInput(stepCloudflareTokenInput, "Paste your Cloudflare API token here...")
+		} else if item.value == "use-env" {
+			// User will set env var and restart
+			m.cancelled = true
+			fmt.Println("\nSet the CLOUDFLARE_API_TOKEN environment variable:")
+			fmt.Println("  export CLOUDFLARE_API_TOKEN=your_token_here")
+			fmt.Println("\nThen run the wizard again.")
+			return m, tea.Quit
+		} else if item.value == "skip" {
+			// Skip Cloudflare setup
+			m.opts.DNSSetupMode = "skip"
+			m.list = newList("Enable SSL?", yesNoItems())
+			m.applyListSize()
+			m.step = stepSSL
+		}
+	case stepCloudflareSetup:
+		if item.value == "setup" {
+			// User wants to setup Cloudflare - fetch zones and let them confirm
+			var cfProvider *dns.CloudflareProvider
+			var err error
+
+			// Use stored token or try to get from env
+			if m.cloudflareToken != "" {
+				cfProvider, err = dns.NewCloudflareProviderWithToken(m.cloudflareToken)
+			} else {
+				cfProvider, err = dns.NewCloudflareProvider()
+			}
+
+			if err != nil {
+				m.validationErr = fmt.Sprintf("Failed to get Cloudflare API token: %v", err)
+				return m, nil
+			}
+			zone, err := cfProvider.FindZoneForDomain(m.opts.Domain)
+			if err != nil {
+				m.validationErr = fmt.Sprintf("Failed to find Cloudflare zone: %v", err)
+				return m, nil
+			}
+			m.cloudflareZoneName = zone.Name
+			// Ask about proxy setting
+			m.list = newList(fmt.Sprintf("Cloudflare zone found: %s", zone.Name), cloudflareProxyItems())
+			m.applyListSize()
+			// Stay in stepCloudflareSetup but with different state
+		} else if item.value == "skip" {
+			// User chose to skip Cloudflare setup
+			m.opts.DNSSetupMode = "skip"
+			if m.opts.AppName == "openreplay" {
+				m.list = newList("DNS setup for OpenReplay", dnsSetupItems(m.opts.Domain))
+				m.applyListSize()
+				m.step = stepDNSSetup
+			} else {
+				m.list = newList("Enable SSL?", yesNoItems())
+				m.applyListSize()
+				m.step = stepSSL
+			}
+		} else if item.value == "install" {
+			// User wants to install wrangler first
+			m.cancelled = true
+			fmt.Println("\nTo install wrangler CLI, run:")
+			fmt.Println("  npm install -g wrangler")
+			fmt.Println("or")
+			fmt.Println("  yarn global add wrangler")
+			fmt.Println("\nThen authenticate with: wrangler login")
+			return m, tea.Quit
+		} else if item.value == "proxied-yes" {
+			// User confirmed zone and wants proxy enabled
+			m.cloudflareProxied = true
+			m.opts.DNSSetupMode = "cloudflare"
+			// Skip DNS setup step since we already configured Cloudflare
+			m.list = newList("Enable SSL?", yesNoItems())
+			m.applyListSize()
+			m.step = stepSSL
+		} else if item.value == "proxied-no" {
+			// User confirmed zone but wants DNS only mode
+			m.cloudflareProxied = false
+			m.opts.DNSSetupMode = "cloudflare"
+			// Skip DNS setup step since we already configured Cloudflare
+			m.list = newList("Enable SSL?", yesNoItems())
+			m.applyListSize()
+			m.step = stepSSL
+		}
 	case stepDNSSetup:
-		m.opts.DNSSetupMode = item.value
+		// Only update DNSSetupMode if it's not already set (e.g., from Cloudflare setup)
+		// This prevents overwriting "cloudflare" with "auto"/"force"/"skip"
+		if m.opts.DNSSetupMode == "" || m.opts.DNSSetupMode == "force" || m.opts.DNSSetupMode == "skip" {
+			m.opts.DNSSetupMode = item.value
+		}
 		m.list = newList("Enable SSL?", yesNoItems())
 		m.applyListSize()
 		m.step = stepSSL
@@ -255,15 +400,36 @@ func (m wizardModel) handleInputSubmit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.opts.Domain = value
-		if m.opts.AppName == "openreplay" {
-			m.list = newList("DNS setup for OpenReplay", dnsSetupItems(m.opts.Domain))
-			m.applyListSize()
-			m.step = stepDNSSetup
-		} else {
-			m.list = newList("Enable SSL?", yesNoItems())
-			m.applyListSize()
-			m.step = stepSSL
+
+		// Detect DNS provider from domain
+		m.detectedDNS = dns.DetectDNSProvider(m.opts.Domain)
+
+		// Show DNS provider options
+		m.list = newList("Choose DNS setup method", dnsProviderChoiceItems(m.detectedDNS, m.opts.ProviderName))
+		m.applyListSize()
+		m.step = stepDNSProviderChoice
+	case stepCloudflareTokenInput:
+		if value == "" {
+			m.validationErr = "token is required"
+			return m, nil
 		}
+		// Validate token by trying to create a provider
+		cfProvider, err := dns.NewCloudflareProviderWithToken(value)
+		if err != nil {
+			m.validationErr = fmt.Sprintf("invalid token: %v", err)
+			return m, nil
+		}
+		// Test the token by trying to fetch zones
+		_, err = cfProvider.FindZoneForDomain(m.opts.Domain)
+		if err != nil {
+			m.validationErr = fmt.Sprintf("token validation failed: %v", err)
+			return m, nil
+		}
+		// Token is valid, store it and proceed
+		m.cloudflareToken = value
+		m.list = newList("Cloudflare DNS Setup", cloudflareSetupItems())
+		m.applyListSize()
+		m.step = stepCloudflareSetup
 	case stepEmail:
 		if value == "" {
 			m.validationErr = "email is required when SSL is enabled"
@@ -423,8 +589,41 @@ func yesNoItems() []list.Item {
 	}
 }
 
+func dnsProviderChoiceItems(detectedDNS dns.DNSProviderInfo, providerName string) []list.Item {
+	items := []list.Item{}
+
+	// Option 1: Detected DNS provider (if Cloudflare)
+	if detectedDNS.Name == dns.DNSProviderCloudflare {
+		items = append(items, optionItem{
+			title: fmt.Sprintf("%s (recommended based on your domain)", detectedDNS.Name),
+			desc:  "Automatically configure DNS via Cloudflare API",
+			value: "cloudflare",
+		})
+	}
+
+	// Option 2: Cloud provider's DNS (if it supports DNS)
+	// DigitalOcean, for example, has DNS management
+	providerSupportsDNS := providerName == "digitalocean" || providerName == "scaleway"
+	if providerSupportsDNS {
+		items = append(items, optionItem{
+			title: fmt.Sprintf("Use %s DNS", providerName),
+			desc:  fmt.Sprintf("Configure DNS using %s's DNS service", providerName),
+			value: "provider",
+		})
+	}
+
+	// Option 3: Skip DNS setup
+	items = append(items, optionItem{
+		title: "Skip DNS setup",
+		desc:  "I'll configure DNS manually at my DNS provider",
+		value: "skip",
+	})
+
+	return items
+}
+
 func dnsSetupItems(domain string) []list.Item {
-	info := utils.DetectDNSProvider(domain)
+	info := dns.DetectDNSProvider(domain)
 	recommended := "unknown"
 	if info.Name != "" {
 		recommended = string(info.Name)
@@ -432,8 +631,48 @@ func dnsSetupItems(domain string) []list.Item {
 
 	return []list.Item{
 		optionItem{title: fmt.Sprintf("auto (recommended: %s)", recommended), desc: "Auto-skip DigitalOcean DNS if your NS points elsewhere", value: "auto"},
-		optionItem{title: "skip DNS setup", desc: "Manage DNS manually (Cloudflare, Route 53, etc.)", value: "skip"},
 		optionItem{title: "force DNS setup", desc: "Attempt provider DNS setup anyway", value: "force"},
+		optionItem{title: "skip DNS setup", desc: "Manage DNS manually (Cloudflare, Route 53, etc.)", value: "skip"},
+	}
+}
+
+func cloudflareSetupItems() []list.Item {
+	return []list.Item{
+		optionItem{title: "Setup with Cloudflare (recommended)", desc: "Automatically configure DNS via Cloudflare API", value: "setup"},
+		optionItem{title: "Skip - Manual setup", desc: "Configure DNS manually at Cloudflare dashboard", value: "skip"},
+	}
+}
+
+func cloudflareProxyItems() []list.Item {
+	return []list.Item{
+		optionItem{title: "Enable proxy (recommended)", desc: "DDoS protection, CDN, hides your server IP", value: "proxied-yes"},
+		optionItem{title: "DNS only mode", desc: "Direct connection to your server", value: "proxied-no"},
+	}
+}
+
+func cloudflareTokenChoiceItems() []list.Item {
+	tokenURL := dns.GetTokenCreationURL()
+	return []list.Item{
+		optionItem{
+			title: "Enter API token",
+			desc:  "I have a Cloudflare API token ready to paste",
+			value: "enter-token",
+		},
+		optionItem{
+			title: "Create token now",
+			desc:  fmt.Sprintf("Open %s to create a token", tokenURL),
+			value: "create-token",
+		},
+		optionItem{
+			title: "Use CLOUDFLARE_API_TOKEN env",
+			desc:  "I'll set the environment variable and restart",
+			value: "use-env",
+		},
+		optionItem{
+			title: "Skip Cloudflare setup",
+			desc:  "Configure DNS manually",
+			value: "skip",
+		},
 	}
 }
 
