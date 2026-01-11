@@ -2,6 +2,7 @@ package dsl
 
 import (
 	"fmt"
+	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -45,7 +46,22 @@ type Spec struct {
 	DomainHint  string   `yaml:"domain_hint"`
 	MinSpec     SpecHW   `yaml:"min_spec"`
 	Providers   []string `yaml:"providers"`
+	DNS         DNSSpec  `yaml:"dns"`
 	Steps       []Step   `yaml:"steps"`
+}
+
+type DNSSpec struct {
+	Records []DNSRecordSpec `yaml:"records"`
+}
+
+// DNSRecordSpec is app-defined DNS desired state (provider-specific application happens elsewhere).
+// Name can be a full hostname or a template using `{opts.Domain}` and `{opts.ServerIP}`.
+type DNSRecordSpec struct {
+	Type    string `yaml:"type"`    // A, AAAA, CNAME, etc.
+	Name    string `yaml:"name"`    // record name (hostname)
+	Content string `yaml:"content"` // optional; defaults to server IP for A/AAAA
+	TTL     int    `yaml:"ttl"`     // 0 means provider default
+	Proxied *bool  `yaml:"proxied"` // nil means "use global default"
 }
 
 type SpecHW struct {
@@ -56,9 +72,10 @@ type SpecHW struct {
 
 type Step struct {
 	Name  string `yaml:"name"`
-	In    string `yaml:"In"` // Where to run the step (e.g., "machine")
+	In    string `yaml:"in"` // Where to run the step (e.g., "machine")
 	If    string `yaml:"if"`
 	Run   string `yaml:"run"`
+	TTY   bool   `yaml:"tty"` // Run step in a PTY (interactive/TUI)
 	Sleep string `yaml:"sleep"`
 	Log   string `yaml:"log"`
 }
@@ -140,6 +157,7 @@ func evalToken(token string, bools map[string]bool) bool {
 
 type Runner struct {
 	Run         func(string) error
+	RunPTY      func(cmd string, onData func([]byte)) (stdin io.WriteCloser, wait func() error, err error)
 	Log         func(string)
 	Sleep       func(time.Duration)
 	Conditional bool
@@ -173,8 +191,18 @@ func RunSteps(r Runner, steps []Step, vars map[string]string, bools map[string]b
 		}
 		if strings.TrimSpace(step.Run) != "" && r.Run != nil {
 			cmd := BuildRunCommand(RenderTemplate(step.Run, vars))
-			if err := r.Run(cmd); err != nil {
-				return err
+			if step.TTY && r.RunPTY != nil {
+				_, wait, err := r.RunPTY(cmd, nil)
+				if err != nil {
+					return err
+				}
+				if err := wait(); err != nil {
+					return err
+				}
+			} else {
+				if err := r.Run(cmd); err != nil {
+					return err
+				}
 			}
 		}
 	}

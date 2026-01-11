@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@source "./src/**/*.{html,js,jsx,ts,tsx}";
+
+html,
+body {
+  background-color: #fafafa;
+  /* zinc-50 */
+  color: #18181b;
+  /* zinc-900 */
+}
+
+@keyframes loading {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  50% {
+    transform: translateX(100%);
+  }
+
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+}

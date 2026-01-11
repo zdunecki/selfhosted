@@ -11,6 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/zdunecki/selfhosted/pkg/dns"
 
+	// "github.com/zdunecki/selfhosted/pkg/server" // Removed to break import cycle
+
 	"github.com/zdunecki/selfhosted/pkg/apps"
 	"github.com/zdunecki/selfhosted/pkg/providers"
 )
@@ -18,7 +20,8 @@ import (
 type wizardStep int
 
 const (
-	stepApp wizardStep = iota
+	stepMode wizardStep = iota
+	stepApp
 	stepProvider
 	stepRegion
 	stepSize
@@ -62,6 +65,7 @@ type wizardModel struct {
 	cloudflareZoneName string              // For Cloudflare setup flow
 	cloudflareProxied  bool                // User's proxy preference
 	detectedDNS        dns.DNSProviderInfo // Detected DNS provider from domain
+	startWebUI         bool
 }
 
 var (
@@ -72,6 +76,9 @@ var (
 	styleSummary   = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
 	styleHighlight = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
 )
+
+// ErrStartWebUI is returned when the user selects the Web UI option
+var ErrStartWebUI = fmt.Errorf("start web ui")
 
 // RunWizard runs the interactive deployment wizard
 func RunWizard(deployFunc func(DeployOptions) error) error {
@@ -89,6 +96,11 @@ func RunWizard(deployFunc func(DeployOptions) error) error {
 	if finalModel.err != nil {
 		return finalModel.err
 	}
+	if finalModel.startWebUI {
+		fmt.Println("Starting Web UI...")
+		// Return special error to signal caller to start web server
+		return ErrStartWebUI
+	}
 	if finalModel.cancelled {
 		return nil
 	}
@@ -104,9 +116,9 @@ func RunWizard(deployFunc func(DeployOptions) error) error {
 
 func newWizardModel() wizardModel {
 	model := wizardModel{
-		step: stepApp,
+		step: stepMode,
 	}
-	model.list = newList("Select application", appItems())
+	model.list = newList("Select mode", modeItems())
 	return model
 }
 
@@ -206,6 +218,15 @@ func (m wizardModel) handleSelection() (tea.Model, tea.Cmd) {
 	}
 
 	switch m.step {
+	case stepMode:
+		if item.value == "web" {
+			m.startWebUI = true
+			return m, tea.Quit
+		}
+		// Continue with CLI wizard
+		m.list = newList("Select application", appItems())
+		m.applyListSize()
+		m.step = stepApp
 	case stepApp:
 		m.opts.AppName = item.value
 		m.list = newList("Select provider", providerItems())
@@ -503,6 +524,13 @@ func (m wizardModel) loadSizes() ([]providers.Size, error) {
 		return nil, err
 	}
 	return provider.ListSizes()
+}
+
+func modeItems() []list.Item {
+	return []list.Item{
+		optionItem{title: "CLI Wizard", desc: "Continue in the terminal", value: "cli"},
+		optionItem{title: "Web UI", desc: "Open in browser (Rich UI)", value: "web"},
+	}
 }
 
 func appItems() []list.Item {

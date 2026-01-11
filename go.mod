@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/bubbletea v0.26.6
 	github.com/charmbracelet/lipgloss v0.10.0
 	github.com/digitalocean/godo v1.130.0
+	github.com/joho/godotenv v1.5.1
 	github.com/spf13/cobra v1.8.1
 	golang.org/x/crypto v0.46.0
 	golang.org/x/oauth2 v0.24.0

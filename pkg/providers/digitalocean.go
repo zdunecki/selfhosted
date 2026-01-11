@@ -18,22 +18,21 @@ type DigitalOcean struct {
 }
 
 func NewDigitalOcean() *DigitalOcean {
-	token := os.Getenv("DIGITALOCEAN_TOKEN")
-	if token == "" {
-		token = os.Getenv("DO_TOKEN")
-	}
-
-	var client *godo.Client
-	if token != "" {
-		tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-		oauthClient := oauth2.NewClient(context.Background(), tokenSource)
-		client = godo.NewClient(oauthClient)
-	}
-
 	return &DigitalOcean{
-		client: client,
-		ctx:    context.Background(),
+		ctx: context.Background(),
 	}
+}
+
+func (d *DigitalOcean) Configure(config map[string]string) error {
+	token, ok := config["token"]
+	if !ok || token == "" {
+		return fmt.Errorf("token invalid or missing")
+	}
+
+	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	oauthClient := oauth2.NewClient(context.Background(), tokenSource)
+	d.client = godo.NewClient(oauthClient)
+	return nil
 }
 
 func (d *DigitalOcean) Name() string {
@@ -49,10 +48,24 @@ func (d *DigitalOcean) DefaultRegion() string {
 }
 
 func (d *DigitalOcean) ensureClient() error {
-	if d.client == nil {
-		return fmt.Errorf("DIGITALOCEAN_TOKEN or DO_TOKEN environment variable required")
+	if d.client != nil {
+		return nil
 	}
-	return nil
+
+	// Try loading from env
+	token := os.Getenv("DIGITALOCEAN_TOKEN")
+	if token == "" {
+		token = os.Getenv("DO_TOKEN")
+	}
+
+	if token != "" {
+		tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+		oauthClient := oauth2.NewClient(context.Background(), tokenSource)
+		d.client = godo.NewClient(oauthClient)
+		return nil
+	}
+
+	return fmt.Errorf("DIGITALOCEAN_TOKEN or DO_TOKEN environment variable required")
 }
 
 func (d *DigitalOcean) ListRegions() ([]Region, error) {

@@ -189,17 +189,9 @@ func (c *CloudflareProvider) FindZoneForDomain(domain string) (*CloudflareZone, 
 	return nil, fmt.Errorf("no matching zone found for domain %s", domain)
 }
 
-// CreateDNSRecord creates an A record in Cloudflare
-func (c *CloudflareProvider) createDNSRecord(zoneID, domain, ip string, proxied bool) error {
+// CreateDNSRecord creates a DNS record in Cloudflare.
+func (c *CloudflareProvider) CreateDNSRecord(zoneID string, recordReq CloudflareDNSRecordRequest) error {
 	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", zoneID)
-
-	recordReq := CloudflareDNSRecordRequest{
-		Type:    "A", // TODO: customize type
-		Name:    domain,
-		Content: ip,
-		TTL:     3600, // TODO: customize ttl
-		Proxied: proxied,
-	}
 
 	jsonData, err := json.Marshal(recordReq)
 	if err != nil {
@@ -250,5 +242,11 @@ func (c *CloudflareProvider) SetupDNS(domain, ip string, proxied bool) error {
 	}
 
 	// Create DNS record
-	return c.createDNSRecord(zone.ID, domain, ip, proxied)
+	return c.CreateDNSRecord(zone.ID, CloudflareDNSRecordRequest{
+		Type:    "A",
+		Name:    domain,
+		Content: ip,
+		TTL:     3600,
+		Proxied: proxied,
+	})
 }

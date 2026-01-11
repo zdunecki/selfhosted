@@ -49,6 +49,7 @@ type InstallConfig struct {
 	SSLCertificateCrt      string
 	HttpToHttpsRedirection bool
 	ExtraVars              map[string]string
+	Logger                 func(string, ...interface{}) // Optional logger for streaming logs
 }
 
 // Registry holds all registered apps

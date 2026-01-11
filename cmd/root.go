@@ -6,8 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/zdunecki/selfhosted/pkg/dns"
-	"github.com/zdunecki/selfhosted/pkg/dsl"
+	"github.com/zdunecki/selfhosted/pkg/server"
 
 	"github.com/zdunecki/selfhosted/pkg/apps"
 	"github.com/zdunecki/selfhosted/pkg/cli"
@@ -142,8 +141,6 @@ var setupSSLCmd = &cobra.Command{
 }
 
 func init() {
-	apps.Register(apps.NewOpenReplayDSL(&dsl.Loader{}))
-
 	// Deploy command flags
 	deployCmd.Flags().StringVarP(&providerName, "provider", "p", "", "Cloud provider (digitalocean, scaleway, ovh)")
 	deployCmd.Flags().StringVarP(&appName, "app", "a", "", "Application to deploy (openreplay, openpanel, plausible)")
@@ -192,7 +189,11 @@ func init() {
 
 func Execute() error {
 	if len(os.Args) == 1 {
-		return cli.RunWizard(deployWithOptions)
+		err := cli.RunWizard(deployWithOptions)
+		if err == cli.ErrStartWebUI {
+			return server.Start(8080)
+		}
+		return err
 	}
 	return rootCmd.Execute()
 }
@@ -219,220 +220,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 // deployWithOptions executes a deployment with the given options
 func deployWithOptions(opts cli.DeployOptions) error {
-	// Get provider
-	provider, err := providers.Get(opts.ProviderName)
-	if err != nil {
-		return fmt.Errorf("provider error: %w", err)
-	}
-
-	// Get app
-	app, err := apps.Get(opts.AppName)
-	if err != nil {
-		return fmt.Errorf("app error: %w", err)
-	}
-
-	// Load SSH keys
-	sshPrivate, sshPublic, err := loadSSHKeys(opts.SSHKeyPath, opts.SSHPubKey)
-	if err != nil {
-		return fmt.Errorf("SSH key error: %w", err)
-	}
-
-	// Determine size (use app minimum if not specified)
-	vmSize := opts.Size
-	if vmSize == "" {
-		vmSize, err = provider.GetSizeForSpecs(app.MinSpecs())
-		if err != nil {
-			return fmt.Errorf("could not find suitable size: %w", err)
-		}
-	}
-
-	// Determine region
-	vmRegion := opts.Region
-	if vmRegion == "" {
-		vmRegion = provider.DefaultRegion()
-	}
-
-	fmt.Printf("🚀 Deploying %s to %s\n", opts.AppName, opts.ProviderName)
-	fmt.Printf("   Region: %s\n", vmRegion)
-	fmt.Printf("   Size: %s\n", vmSize)
-	fmt.Printf("   Domain: %s\n", opts.Domain)
-	fmt.Println()
-
-	// Create deployment config
-	serverName := opts.DeployName
-	if serverName == "" {
-		serverName = fmt.Sprintf("%s-server", opts.AppName)
-	}
-	config := &providers.DeployConfig{
-		Name:          serverName,
-		Region:        vmRegion,
-		Size:          vmSize,
-		SSHPublicKey:  sshPublic,
-		SSHPrivateKey: sshPrivate,
-		Domain:        opts.Domain,
-		Tags:          []string{opts.AppName, "selfhost"},
-	}
-
-	// Step 1: Create server
-	fmt.Println("⏳ Creating server...")
-	server, err := provider.CreateServer(config)
-	if err != nil {
-		return fmt.Errorf("failed to create server: %w", err)
-	}
-	fmt.Printf("✅ Server created: %s (ID: %s)\n", server.Name, server.ID)
-
-	// Step 2: Wait for server
-	fmt.Println("⏳ Waiting for server to be ready...")
-	server, err = provider.WaitForServer(server.ID)
-	if err != nil {
-		return fmt.Errorf("server not ready: %w", err)
-	}
-	fmt.Printf("✅ Server ready with IP: %s\n", server.IP)
-
-	// Step 3: Setup DNS
-	detectedDNS := dns.DetectDNSProvider(opts.Domain)
-	detectedProvider := string(detectedDNS.Name)
-
-	if apps.ShouldSetupDNS(app, opts.DNSSetupMode, provider.Name(), detectedProvider) {
-		if opts.DNSSetupMode == "cloudflare" && opts.CloudflareZoneName != "" {
-			fmt.Println("⏳ Setting up Cloudflare DNS...")
-
-			// Use custom token if provided, otherwise try env var
-			var cfProvider *dns.CloudflareProvider
-			var err error
-			if opts.CloudflareToken != "" {
-				cfProvider, err = dns.NewCloudflareProviderWithToken(opts.CloudflareToken)
-			} else {
-				cfProvider, err = dns.NewCloudflareProvider()
-			}
-
-			if err != nil {
-				fmt.Printf("⚠️  Could not initialize Cloudflare provider: %v\n", err)
-				fmt.Println("ℹ️  Please configure DNS manually at your Cloudflare dashboard")
-			} else {
-				err = cfProvider.SetupDNS(opts.Domain, server.IP, opts.CloudflareProxied)
-				if err != nil {
-					fmt.Printf("⚠️  Cloudflare DNS setup failed: %v\n", err)
-					fmt.Println("ℹ️  Please configure DNS manually at your Cloudflare dashboard")
-				} else {
-					if opts.CloudflareProxied {
-						fmt.Println("✅ DNS configured with Cloudflare proxy enabled")
-					} else {
-						fmt.Println("✅ DNS configured (DNS only mode)")
-					}
-				}
-			}
-		} else {
-			// Try provider's native DNS setup
-			err = provider.SetupDNS(opts.Domain, server.IP)
-			if err != nil {
-				fmt.Printf("⚠️  DNS setup failed (manual setup may be needed): %v\n", err)
-			} else {
-				fmt.Println("✅ DNS configured")
-			}
-		}
-	} else {
-		fmt.Println("ℹ️  Skipping DNS setup. Configure DNS at your provider.")
-	}
-
-	// Step 4: Wait for SSH
-	fmt.Println("⏳ Waiting for SSH...")
-	err = providers.WaitForSSH(server.IP, 22)
-	if err != nil {
-		return fmt.Errorf("SSH not ready: %w", err)
-	}
-	fmt.Println("✅ SSH ready")
-
-	// Step 5: Install app
-	fmt.Printf("⏳ Installing %s (this may take 10-15 minutes)...\n", opts.AppName)
-	installConfig := &apps.InstallConfig{
-		Domain:                 opts.Domain,
-		ServerIP:               server.IP,
-		SSHKey:                 sshPrivate,
-		SSHUser:                "root",
-		EnableSSL:              opts.EnableSSL,
-		Email:                  opts.Email,
-		SSL:                    opts.EnableSSL,
-		SSLPrivateKeyFile:      opts.SSLPrivateKeyFile,
-		SSLCertificateCrt:      opts.SSLCertificateCrt,
-		HttpToHttpsRedirection: opts.HttpToHttpsRedirection,
-	}
-
-	err = app.Install(installConfig)
-	if err != nil {
-		return fmt.Errorf("installation failed: %w", err)
-	}
-	fmt.Printf("✅ %s installed\n", opts.AppName)
-
-	// Step 6: Setup SSL (if enabled)
-	if (opts.EnableSSL && opts.Email != "") || opts.SSLPrivateKeyFile != "" || opts.SSLCertificateCrt != "" || opts.HttpToHttpsRedirection {
-		fmt.Println("⏳ Setting up SSL...")
-		err = app.SetupSSL(installConfig)
-		if err != nil {
-			fmt.Printf("⚠️  SSL setup failed: %v\n", err)
-		} else {
-			fmt.Println("✅ SSL configured")
-		}
-	}
-
-	// Print summary
-	app.PrintSummary(server.IP, opts.Domain)
-
-	return nil
-}
-
-func loadSSHKeys(privatePath, publicPath string) (privateKey, publicKey string, err error) {
-	// Try to load from flags first
-	if privatePath != "" {
-		data, err := os.ReadFile(privatePath)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read private key: %w", err)
-		}
-		privateKey = string(data)
-	}
-
-	if publicPath != "" {
-		data, err := os.ReadFile(publicPath)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read public key: %w", err)
-		}
-		publicKey = string(data)
-	}
-
-	// Fallback to default paths
-	if privateKey == "" {
-		home, _ := os.UserHomeDir()
-		defaultPaths := []string{
-			home + "/.ssh/id_rsa",
-			home + "/.ssh/id_ed25519",
-		}
-		for _, p := range defaultPaths {
-			if data, err := os.ReadFile(p); err == nil {
-				privateKey = string(data)
-				break
-			}
-		}
-	}
-
-	if publicKey == "" {
-		home, _ := os.UserHomeDir()
-		defaultPaths := []string{
-			home + "/.ssh/id_rsa.pub",
-			home + "/.ssh/id_ed25519.pub",
-		}
-		for _, p := range defaultPaths {
-			if data, err := os.ReadFile(p); err == nil {
-				publicKey = string(data)
-				break
-			}
-		}
-	}
-
-	if privateKey == "" || publicKey == "" {
-		return "", "", fmt.Errorf("SSH keys not found. Use --ssh-key and --ssh-pub flags")
-	}
-
-	return privateKey, publicKey, nil
+	return cli.Deploy(opts, func(format string, a ...interface{}) {
+		fmt.Printf(format, a...)
+	})
 }
 
 func runSetupSSL(cmd *cobra.Command, args []string) error {
@@ -446,7 +236,7 @@ func runSetupSSL(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load SSH keys
-	sshPrivate, _, err := loadSSHKeys(sshKeyPath, "")
+	sshPrivate, _, err := cli.LoadSSHKeys(sshKeyPath, "")
 	if err != nil {
 		return fmt.Errorf("SSH key error: %w", err)
 	}

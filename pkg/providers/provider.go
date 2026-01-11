@@ -37,22 +37,25 @@ type Provider interface {
 
 	// SetupDNS creates DNS records
 	SetupDNS(domain, ip string) error
+
+	// Configure updates provider settings (e.g. API tokens)
+	Configure(config map[string]string) error
 }
 
 // Region represents a datacenter region
 type Region struct {
-	Slug string
-	Name string
+	Slug string `json:"slug"`
+	Name string `json:"name"`
 }
 
 // Size represents a VM size/plan
 type Size struct {
-	Slug         string
-	VCPUs        int
-	MemoryMB     int
-	DiskGB       int
-	PriceMonthly float64
-	PriceHourly  float64
+	Slug         string  `json:"slug"`
+	VCPUs        int     `json:"vcpus"`
+	MemoryMB     int     `json:"memory"`
+	DiskGB       int     `json:"disk"`
+	PriceMonthly float64 `json:"price_monthly"`
+	PriceHourly  float64 `json:"price_hourly"`
 }
 
 // Specs represents minimum hardware requirements

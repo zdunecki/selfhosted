@@ -1,0 +1,65 @@
+app: openpanel
+description: OpenPanel - Open-source analytics (self-hosted)
+os: ubuntu-24-04-x64
+domain_hint: "Example: openpanel.your-domain.com"
+dns:
+  records:
+    # OpenPanel uses an additional worker subdomain; keep these DNS-only (no proxy).
+    - type: A
+      name: "{opts.Domain}"
+      proxied: false
+    - type: A
+      name: "worker.{opts.Domain}"
+      proxied: false
+min_spec:
+  cpu: 2
+  ram: 2gib
+  disk: 20gib
+providers:
+  - digitalocean
+
+wizard:
+  domain_hint: "Example: openpanel.your-domain.com"
+  steps:
+    application:
+      configuration:
+        - name: Node.js installation
+          type: boolean
+          default: true
+          required: true
+
+        - name: Docker installation
+          type: boolean
+          default: true
+          required: true
+
+steps:
+  - name: Prepare server
+    in: machine
+    run: |
+      cloud-init status --wait || true
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get install -y git curl ca-certificates
+
+  - name: Clone OpenPanel (self-hosting)
+    in: machine
+    run: |
+      rm -rf /opt/openpanel || true
+      mkdir -p /opt
+      git clone -b self-hosting https://github.com/Openpanel-dev/openpanel.git /opt/openpanel
+      cd /opt/openpanel/self-hosting
+      chmod +x setup start stop logs update rebuild danger_wipe_everything 2>/dev/null || true
+
+  - name: OpenPanel setup (interactive)
+    in: machine
+    tty: true
+    run: |
+      cd /opt/openpanel/self-hosting
+      ./setup
+
+  - name: Start OpenPanel
+    in: machine
+    run: |
+      cd /opt/openpanel/self-hosting
+      ./start
+
