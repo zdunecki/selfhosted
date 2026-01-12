@@ -70,16 +70,31 @@ export function StepCloudProvider({ providers, state, actions, getProviderLogo }
                 <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-6">
                     <h3 className="text-yellow-800 font-medium mb-2">Authentication Required</h3>
                     <p className="text-sm text-yellow-700 mb-4">
-                        Enter your {state.providerName} API token to continue.
+                        {state.providerName.toLowerCase() === 'scaleway'
+                            ? 'Paste your Scaleway JSON config to continue (access_key, secret_key, project_id, optional organization_id, optional zone).'
+                            : state.providerName.toLowerCase() === 'gcp'
+                                ? 'Use ADC on the machine running SelfHosted (run: gcloud auth application-default login) OR paste your GCP Service Account JSON. (Enterprise: you may also need billing_account + parent.)'
+                            : `Enter your ${state.providerName} API token to continue.`}
                     </p>
                     <div className="flex gap-3">
-                        <input
-                            type="password"
-                            className="flex-1 bg-white border border-yellow-300 rounded-lg px-4 py-2 text-zinc-900 focus:ring-2 focus:ring-yellow-500/20 outline-none"
-                            placeholder="API Token"
-                            value={state.configToken}
-                            onChange={e => actions.setConfigToken(e.target.value)}
-                        />
+                        {state.providerName.toLowerCase() === 'scaleway' || state.providerName.toLowerCase() === 'gcp' ? (
+                            <textarea
+                                className="flex-1 bg-white border border-yellow-300 rounded-lg px-4 py-2 text-zinc-900 focus:ring-2 focus:ring-yellow-500/20 outline-none font-mono text-xs min-h-[90px]"
+                                placeholder={state.providerName.toLowerCase() === 'gcp'
+                                    ? '{\n  "type": "service_account",\n  "project_id": "...",\n  "private_key_id": "...",\n  "private_key": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n",\n  "client_email": "...",\n  "client_id": "..." \n}'
+                                    : '{"access_key":"SCW...","secret_key":"...","project_id":"...","zone":"fr-par-1"}'}
+                                value={state.configToken}
+                                onChange={e => actions.setConfigToken(e.target.value)}
+                            />
+                        ) : (
+                            <input
+                                type="password"
+                                className="flex-1 bg-white border border-yellow-300 rounded-lg px-4 py-2 text-zinc-900 focus:ring-2 focus:ring-yellow-500/20 outline-none"
+                                placeholder="API Token"
+                                value={state.configToken}
+                                onChange={e => actions.setConfigToken(e.target.value)}
+                            />
+                        )}
                         <button
                             onClick={actions.handleSaveToken}
                             className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg text-sm font-medium transition-colors"
@@ -102,15 +117,27 @@ export function StepCloudProvider({ providers, state, actions, getProviderLogo }
                     ) : (
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                             {state.regions.map(r => {
-                                let flag = '🌍';
-                                if (r.slug.startsWith('nyc') || r.slug.startsWith('sfo')) flag = '🇺🇸';
-                                else if (r.slug.startsWith('ams')) flag = '🇳🇱';
-                                else if (r.slug.startsWith('lon')) flag = '🇬🇧';
-                                else if (r.slug.startsWith('fra')) flag = '🇩🇪';
-                                else if (r.slug.startsWith('tor')) flag = '🇨🇦';
-                                else if (r.slug.startsWith('sgp')) flag = '🇸🇬';
-                                else if (r.slug.startsWith('blr')) flag = '🇮🇳';
-                                else if (r.slug.startsWith('syd')) flag = '🇦🇺';
+                                const slug = (r.slug || '').toLowerCase()
+                                let flag = '🌍'
+
+                                // UpCloud/Scaleway are <cc>-<city><n> or <cc>-<city>-<n>, e.g. nl-ams1, pl-waw-1, fr-par-1
+                                if (slug.startsWith('nl-') || slug.includes('nl-ams')) flag = '🇳🇱'
+                                else if (slug.startsWith('pl-') || slug.includes('pl-waw')) flag = '🇵🇱'
+                                else if (slug.startsWith('fr-') || slug.includes('fr-par')) flag = '🇫🇷'
+                                else if (slug.startsWith('de-') || slug.includes('de-fra')) flag = '🇩🇪'
+                                else if (slug.startsWith('fi-') || slug.includes('fi-hel')) flag = '🇫🇮'
+                                else if (slug.startsWith('uk-') || slug.includes('uk-lon') || slug.includes('gb-lon')) flag = '🇬🇧'
+                                else if (slug.startsWith('us-') || slug.includes('us-')) flag = '🇺🇸'
+
+                                // DigitalOcean style (kept for backward compatibility): ams3, fra1, nyc3...
+                                else if (slug.startsWith('nyc') || slug.startsWith('sfo')) flag = '🇺🇸'
+                                else if (slug.startsWith('ams')) flag = '🇳🇱'
+                                else if (slug.startsWith('lon')) flag = '🇬🇧'
+                                else if (slug.startsWith('fra')) flag = '🇩🇪'
+                                else if (slug.startsWith('tor')) flag = '🇨🇦'
+                                else if (slug.startsWith('sgp')) flag = '🇸🇬'
+                                else if (slug.startsWith('blr')) flag = '🇮🇳'
+                                else if (slug.startsWith('syd')) flag = '🇦🇺'
 
                                 return (
                                     <div
@@ -194,7 +221,10 @@ export function StepCloudProvider({ providers, state, actions, getProviderLogo }
                                             )}
                                             <div className="flex justify-between items-start mb-2">
                                                 <div className="text-sm font-mono text-zinc-500">{s.slug}</div>
-                                                <div className="text-zinc-900 font-medium">${s.price_monthly}<span className="text-zinc-500 text-xs">/mo</span></div>
+                                                <div className="text-zinc-900 font-medium">
+                                                    ${Number(s.price_monthly).toFixed(2)}
+                                                    <span className="text-zinc-500 text-xs">/mo</span>
+                                                </div>
                                             </div>
                                             <div className="text-xs text-zinc-500 flex gap-3">
                                                 <span>{s.vcpus} vCPU</span>

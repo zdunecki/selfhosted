@@ -1,0 +1,52 @@
+app: rybbit
+description: Rybbit - open-source, privacy-friendly web & product analytics (ClickHouse + Postgres + HTTPS via Caddy)
+os: ubuntu-24-04-x64
+dns:
+  records:
+    # Rybbit uses Caddy for automatic HTTPS; ACME works best with DNS-only when using Cloudflare.
+    - type: A
+      name: "{opts.Domain}"
+      proxied: false
+min_spec:
+  cpu: 2
+  ram: 2gib
+  disk: 20gib
+providers:
+  - digitalocean
+
+wizard:
+  domain_hint: "Example: tracking.your-domain.com"
+
+steps:
+  - name: Prepare server
+    in: machine
+    run: |
+      cloud-init status --wait || true
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get install -y git curl ca-certificates openssl
+
+  - name: Install Docker + Compose
+    in: machine
+    run: |
+      curl -fsSL https://get.docker.com | sh
+      docker compose version || (apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin)
+
+  - name: Clone Rybbit
+    in: machine
+    run: |
+      rm -rf /opt/rybbit || true
+      mkdir -p /opt
+      git clone https://github.com/rybbit-io/rybbit.git /opt/rybbit
+
+  - name: Run Rybbit setup (creates .env + starts Docker Compose)
+    in: machine
+    run: |
+      cd /opt/rybbit
+      chmod +x *.sh
+      ./setup.sh "{opts.Domain}"
+
+  - name: Verify services
+    in: machine
+    run: |
+      cd /opt/rybbit
+      docker compose ps

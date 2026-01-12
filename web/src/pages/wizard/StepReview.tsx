@@ -8,6 +8,9 @@ interface StepReviewProps {
 }
 
 export function StepReview({ state, regions, sizes }: StepReviewProps) {
+    const selectedSize = sizes.find(s => s.slug === state.size)
+    const priceMonthly = selectedSize ? Number(selectedSize.price_monthly) : 0
+
     return (
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <h2 className="text-lg font-medium text-zinc-900">Review & Deploy</h2>
@@ -49,11 +52,13 @@ export function StepReview({ state, regions, sizes }: StepReviewProps) {
                     )}
                     <div className="col-span-1">
                         <dt className="text-zinc-500">Plan</dt>
-                        <dd className="text-zinc-900 font-medium">{state.size} (${sizes.find(s => s.slug === state.size)?.price_monthly}/mo)</dd>
+                        <dd className="text-zinc-900 font-medium">
+                            {state.size} (${priceMonthly.toFixed(2)}/mo)
+                        </dd>
                     </div>
                     <div className="col-span-2 pt-2 border-t border-zinc-200 mt-2">
                         <dt className="text-zinc-500">Total Monthly Cost</dt>
-                        <dd className="text-green-600 font-bold text-lg">${sizes.find(s => s.slug === state.size)?.price_monthly || 0}</dd>
+                        <dd className="text-green-600 font-bold text-lg">${priceMonthly.toFixed(2)}</dd>
                     </div>
                 </dl>
             </div>

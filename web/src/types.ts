@@ -3,6 +3,26 @@ export interface App {
   description: string
   min_cpus: number
   min_memory: number
+  domain_hint?: string
+  wizard?: {
+    application?: {
+      custom_questions?: WizardQuestion[]
+    }
+  }
+}
+
+export interface WizardQuestion {
+  id: string
+  name: string
+  type: 'boolean' | 'text' | 'choice' | string
+  required: boolean
+  default?: any
+  choices?: WizardChoice[]
+}
+
+export interface WizardChoice {
+  name: string
+  default?: any
 }
 
 export interface Provider {

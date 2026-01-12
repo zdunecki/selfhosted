@@ -43,6 +43,20 @@ func (d *DigitalOcean) Description() string {
 	return "DigitalOcean - Simple cloud hosting"
 }
 
+// NeedsConfig indicates this provider typically requires user-supplied credentials.
+// (It can also be configured via env vars, but the installer UI should prompt by default.)
+func (d *DigitalOcean) NeedsConfig() bool {
+	// If client already configured via Configure(), no config needed.
+	if d.client != nil {
+		return false
+	}
+	// If env vars exist, no config needed.
+	if os.Getenv("DIGITALOCEAN_TOKEN") != "" || os.Getenv("DO_TOKEN") != "" {
+		return false
+	}
+	return true
+}
+
 func (d *DigitalOcean) DefaultRegion() string {
 	return "fra1"
 }

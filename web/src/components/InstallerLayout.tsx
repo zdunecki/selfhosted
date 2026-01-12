@@ -139,7 +139,7 @@ export function InstallerLayout({
                 />
               </div>
               <p className="text-zinc-600 text-[9px] italic text-center">
-                SelfHosted does not store any credentials, read more{" "}
+                SelfHosted does not store and credentials, read more{" "}
                 <a
                   href="https://github.com/zdunecki/selfhosted/blob/main/README.md"
                   target="_blank"

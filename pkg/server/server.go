@@ -26,6 +26,10 @@ import (
 var frontendDist embed.FS
 
 func Start(port int) error {
+	if err := initSecureKeypair(); err != nil {
+		return fmt.Errorf("init secure keypair: %w", err)
+	}
+
 	// Serve frontend
 	dist, err := fs.Sub(frontendDist, "dist")
 	if err != nil {
@@ -60,12 +64,14 @@ func Start(port int) error {
 	http.HandleFunc("/api/apps", handleListApps)
 	http.HandleFunc("/api/pty/input", handlePTYInput)
 	http.HandleFunc("/api/providers", handleListProviders)
+	http.HandleFunc("/api/providers/check", handleCheckProviderCredentials)
 	http.HandleFunc("/api/regions", handleListRegions)
 	http.HandleFunc("/api/sizes", handleListSizes)
 	http.HandleFunc("/api/deploy", handleDeploy)
 	http.HandleFunc("/api/providers/config", handleProviderConfig)
 	http.HandleFunc("/api/domains/check", handleDomainCheck)
 	http.HandleFunc("/api/cloudflare/verify", handleCloudflareVerify)
+	http.HandleFunc("/api/crypto/public-key", handlePublicKey)
 
 	url := fmt.Sprintf("http://localhost:%d", port)
 	log.Printf("Starting web interface at %s\n", url)
@@ -76,6 +82,36 @@ func Start(port int) error {
 		log.Fatal(err)
 	}
 	return nil // Return nil as log.Fatal will exit the program on error
+}
+
+func handleCheckProviderCredentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	providerName := r.URL.Query().Get("provider")
+	if providerName == "" {
+		http.Error(w, "provider is required", http.StatusBadRequest)
+		return
+	}
+
+	p, err := providers.Get(providerName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	needsConfig := false
+	if np, ok := p.(interface{ NeedsConfig() bool }); ok {
+		needsConfig = np.NeedsConfig()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"provider":       providerName,
+		"hasCredentials": !needsConfig,
+		"needsConfig":    needsConfig,
+	})
 }
 
 func handlePTYInput(w http.ResponseWriter, r *http.Request) {
@@ -111,16 +147,27 @@ func handleListApps(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 		MinCPUs     int    `json:"min_cpus"`
 		MinMemory   int    `json:"min_memory"`
+		DomainHint  string `json:"domain_hint"`
+		Wizard      struct {
+			Application struct {
+				CustomQuestions []apps.WizardQuestion `json:"custom_questions,omitempty"`
+			} `json:"application"`
+		} `json:"wizard,omitempty"`
 	}
 	var res []AppResponse
 	for name, app := range apps.Registry {
 		specs := app.MinSpecs()
-		res = append(res, AppResponse{
+		ar := AppResponse{
 			Name:        name,
 			Description: app.Description(),
 			MinCPUs:     specs.CPUs,
 			MinMemory:   specs.MemoryMB,
-		})
+			DomainHint:  app.DomainHint(),
+		}
+		if wp, ok := app.(apps.WizardProvider); ok {
+			ar.Wizard.Application.CustomQuestions = wp.WizardQuestions()
+		}
+		res = append(res, ar)
 	}
 	sort.Slice(res, func(i, j int) bool { return res[i].Name < res[j].Name })
 	json.NewEncoder(w).Encode(res)
@@ -130,12 +177,18 @@ func handleListProviders(w http.ResponseWriter, r *http.Request) {
 	type ProviderResponse struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		NeedsConfig bool   `json:"needs_config,omitempty"`
 	}
 	var res []ProviderResponse
 	for name, p := range providers.Registry {
+		needsConfig := false
+		if np, ok := p.(interface{ NeedsConfig() bool }); ok {
+			needsConfig = np.NeedsConfig()
+		}
 		res = append(res, ProviderResponse{
 			Name:        name,
 			Description: p.Description(),
+			NeedsConfig: needsConfig,
 		})
 	}
 	sort.Slice(res, func(i, j int) bool { return res[i].Name < res[j].Name })
@@ -159,12 +212,28 @@ func handleListRegions(w http.ResponseWriter, r *http.Request) {
 
 func handleListSizes(w http.ResponseWriter, r *http.Request) {
 	providerName := r.URL.Query().Get("provider")
+	region := r.URL.Query().Get("region")
 	p, err := providers.Get(providerName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	sizes, err := p.ListSizes()
+
+	// Optional: if provider supports region/zone-specific sizes, use them.
+	type sizesByRegion interface {
+		ListSizesForRegion(region string) ([]providers.Size, error)
+	}
+
+	var sizes []providers.Size
+	if region != "" {
+		if sp, ok := p.(sizesByRegion); ok {
+			sizes, err = sp.ListSizesForRegion(region)
+		} else {
+			sizes, err = p.ListSizes()
+		}
+	} else {
+		sizes, err = p.ListSizes()
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -180,21 +249,25 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	// Parse options
 	var opts struct {
-		App                 string `json:"app"`
-		Provider            string `json:"provider"`
-		Region              string `json:"region"`
-		Size                string `json:"size"`
-		Domain              string `json:"domain"`
-		Name                string `json:"serverName"`
-		DNSMode             string `json:"dnsMode"`
-		CloudflareToken     string `json:"cloudflareToken"`
-		CloudflareAccountId string `json:"cloudflareAccountId"`
-		CloudflareProxied   *bool  `json:"cloudflareProxied"` // Optional, defaults to true
+		App                 string                 `json:"app"`
+		Provider            string                 `json:"provider"`
+		Region              string                 `json:"region"`
+		Size                string                 `json:"size"`
+		Domain              string                 `json:"domain"`
+		Name                string                 `json:"serverName"`
+		DNSMode             string                 `json:"dnsMode"`
+		CloudflareToken     string                 `json:"cloudflareToken" secure:"rsa_oaep_b64" secure_key:"CloudflareTokenKeyID"`
+		CloudflareTokenKeyID string                `json:"cloudflareTokenKeyId"`
+		CloudflareAccountId string                 `json:"cloudflareAccountId"`
+		CloudflareProxied   *bool                  `json:"cloudflareProxied"` // Optional, defaults to true
+		WizardAnswers       map[string]interface{} `json:"wizardAnswers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// If frontend sent encrypted Cloudflare token, decrypt into opts.CloudflareToken.
+	_ = decryptSecureFields(&opts)
 
 	// Default CloudflareProxied to true if not specified and Cloudflare is being used
 	cloudflareProxied := true
@@ -219,6 +292,7 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		DNSSetupMode:      opts.DNSMode,
 		CloudflareToken:   opts.CloudflareToken,
 		CloudflareProxied: cloudflareProxied,
+		WizardAnswers:     opts.WizardAnswers,
 	}
 
 	// Set headers for streaming (must be set before writing status)
@@ -511,13 +585,16 @@ func handleCloudflareVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Token     string `json:"token"`
+		Token     string `json:"token" secure:"rsa_oaep_b64" secure_key:"KeyID"`
+		KeyID     string `json:"keyId"`
 		AccountID string `json:"accountId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// If frontend sent encrypted token, decrypt into req.Token.
+	_ = decryptSecureFields(&req)
 
 	if req.Token == "" {
 		http.Error(w, "Token is required", http.StatusBadRequest)
@@ -560,4 +637,22 @@ func handleCloudflareVerify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(cfResp.StatusCode)
 	w.Write(body)
+}
+
+func handlePublicKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	keyID, spkiB64, err := currentPublicKeySPKIB64()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"alg":     "RSA-OAEP-256",
+		"keyId":   keyID,
+		"spkiB64": spkiB64,
+	})
 }

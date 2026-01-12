@@ -1,0 +1,71 @@
+app: plausible
+description: Plausible Community Edition - lightweight, privacy-friendly web analytics (Docker Compose)
+os: ubuntu-24-04-x64
+dns:
+  records:
+    # Plausible CE uses Let's Encrypt inside the stack when bound to 80/443.
+    # For Cloudflare users, keep this record DNS-only (not proxied) so ACME can validate.
+    - type: A
+      name: "{opts.Domain}"
+      proxied: false
+min_spec:
+  cpu: 2
+  ram: 2gib
+  disk: 20gib
+providers:
+  - digitalocean
+
+wizard:
+  domain_hint: "Example: plausible.your-domain.com"
+
+steps:
+  - name: Prepare server
+    in: machine
+    run: |
+      cloud-init status --wait || true
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get install -y git curl ca-certificates openssl
+
+  - name: Install Docker + Compose
+    in: machine
+    run: |
+      # Install Docker Engine (includes docker compose plugin on modern Ubuntu)
+      curl -fsSL https://get.docker.com | sh
+      # Ensure compose is present
+      docker compose version || (apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin)
+
+  - name: Clone Plausible Community Edition
+    in: machine
+    run: |
+      rm -rf /opt/plausible-ce || true
+      mkdir -p /opt
+      git clone -b v3.1.0 --single-branch https://github.com/plausible/community-edition /opt/plausible-ce
+
+  - name: Configure Plausible (.env + ports)
+    in: machine
+    run: |
+      cd /opt/plausible-ce
+      # BASE_URL must match the real domain (used for links and security).
+      BASE_URL="https://{opts.Domain}"
+      SECRET_KEY_BASE="$(openssl rand -base64 64 | tr -d '\n')"
+      cat > .env << EOF
+      BASE_URL=${BASE_URL}
+      SECRET_KEY_BASE=${SECRET_KEY_BASE}
+      HTTP_PORT=80
+      HTTPS_PORT=443
+      EOF
+
+      cat > compose.override.yml << 'EOF'
+      services:
+        plausible:
+          ports:
+            - 80:80
+            - 443:443
+      EOF
+
+  - name: Start Plausible (Docker Compose)
+    in: machine
+    run: |
+      cd /opt/plausible-ce
+      docker compose up -d
+      docker compose ps

@@ -4,13 +4,20 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zdunecki/selfhosted/pkg/dsl"
 	"github.com/zdunecki/selfhosted/pkg/providers"
 	"github.com/zdunecki/selfhosted/pkg/utils"
 )
+
+var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
+var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+var ansiOSC = regexp.MustCompile(`\x1b\][^\x07]*(\x07|\x1b\\)`)
+var controlChars = regexp.MustCompile(`[\x00-\x08\x0b-\x1f\x7f]`)
 
 // DSLApp is a generic App implementation backed by a YAML DSL spec.
 // This is intended to cover the common case where adding a new app only requires:
@@ -97,6 +104,12 @@ func (a *DSLApp) runSteps(config *InstallConfig, conditional bool) error {
 
 	// We implement the step loop here (instead of dsl.RunStepsWithConfig) so we can support interactive PTY steps.
 	vars := dsl.BuildVarsFromStruct(config)
+	// Merge ExtraVars (used for wizard answers and any app-specific template keys)
+	if config.ExtraVars != nil {
+		for k, v := range config.ExtraVars {
+			vars[k] = v
+		}
+	}
 	bools := dsl.BuildBoolsFromStruct(config)
 
 	for _, step := range a.spec.Steps {
@@ -130,12 +143,17 @@ func (a *DSLApp) runSteps(config *InstallConfig, conditional bool) error {
 		}
 		cmd := dsl.BuildRunCommand(dsl.RenderTemplate(step.Run, vars))
 
-		if step.TTY {
+		if step.TTY.Enabled {
 			// Interactive/TUI step: allocate a PTY and stream raw output to the installer UI.
 			sessionID := randomID()
 			if config.Logger != nil {
 				config.Logger("[SELFHOSTED::PTY_SESSION] %s\n", sessionID)
 			}
+
+			// Keep a rolling text buffer of PTY output for wait_for matching (best-effort; ANSI junk may exist).
+			var outMu sync.Mutex
+			var outBuf strings.Builder
+			outChanged := make(chan struct{}, 1)
 
 			stdin, wait, err := runner.RunPTY(cmd, func(chunk []byte) {
 				if config.Logger == nil || len(chunk) == 0 {
@@ -144,6 +162,21 @@ func (a *DSLApp) runSteps(config *InstallConfig, conditional bool) error {
 				// Send raw bytes via SSE as base64 to preserve ANSI + cursor movements.
 				b64 := base64.StdEncoding.EncodeToString(chunk)
 				config.Logger("[SELFHOSTED::PTY] %s\n", b64)
+
+				// Append to rolling buffer for auto-answer prompt matching
+				outMu.Lock()
+				outBuf.Write(chunk)
+				// cap memory (keep last ~64KB)
+				s := outBuf.String()
+				if len(s) > 65536 {
+					outBuf.Reset()
+					outBuf.WriteString(s[len(s)-65536:])
+				}
+				outMu.Unlock()
+				select {
+				case outChanged <- struct{}{}:
+				default:
+				}
 			})
 			if err != nil {
 				if config.Logger != nil {
@@ -153,6 +186,81 @@ func (a *DSLApp) runSteps(config *InstallConfig, conditional bool) error {
 			}
 
 			utils.RegisterPTY(sessionID, stdin)
+
+			// Optional: backend-driven auto-answer from YAML (best-effort).
+			if len(step.TTY.AutoAnswer) > 0 {
+				go func() {
+					// Give the TUI a moment to render the first prompt.
+					time.Sleep(800 * time.Millisecond)
+					for _, a := range step.TTY.AutoAnswer {
+						// Wait for prompt match if configured
+						if strings.TrimSpace(a.WaitFor) != "" {
+							timeout := a.TimeoutMS
+							if timeout <= 0 {
+								timeout = 10 * 60 * 1000
+							}
+							deadline := time.Now().Add(time.Duration(timeout) * time.Millisecond)
+
+							var re *regexp.Regexp
+							if a.WaitForRegex {
+								if compiled, err := regexp.Compile(a.WaitFor); err == nil {
+									re = compiled
+								}
+							}
+
+							for {
+								outMu.Lock()
+								cur := stripANSI(outBuf.String())
+								outMu.Unlock()
+
+								matched := false
+								if re != nil {
+									matched = re.MatchString(cur)
+								} else {
+									matched = strings.Contains(cur, a.WaitFor)
+								}
+								if matched {
+									break
+								}
+								if time.Now().After(deadline) {
+									// Give up on this answer
+									break
+								}
+								// Wait for more output or timeout tick
+								select {
+								case <-outChanged:
+								case <-time.After(250 * time.Millisecond):
+								}
+							}
+						}
+
+						if a.DelayMS > 0 {
+							time.Sleep(time.Duration(a.DelayMS) * time.Millisecond)
+						} else {
+							time.Sleep(350 * time.Millisecond)
+						}
+						// IMPORTANT: preserve raw control sequences like "\r" or "\t\r".
+						// Some prompts (inquirer/whiptail) require Enter/Tab+Enter and trimming would drop them.
+						renderedRaw := dsl.RenderTemplate(a.Value, vars)
+						val := renderedRaw
+						if !strings.Contains(a.Value, "\n") && !strings.Contains(a.Value, "\r") {
+							// For normal string answers, trim trailing newlines and send + Enter.
+							val = strings.TrimRight(val, "\r\n")
+						}
+						// Convenience: treat "true/false" as y/n
+						if strings.EqualFold(strings.TrimSpace(val), "true") {
+							val = "y"
+						} else if strings.EqualFold(strings.TrimSpace(val), "false") {
+							val = "n"
+						}
+						// Ensure enter unless caller provided explicit CR/LF in the YAML value.
+						if !strings.Contains(a.Value, "\n") && !strings.Contains(a.Value, "\r") {
+							val = val + "\r"
+						}
+						_, _ = stdin.Write([]byte(val))
+					}
+				}()
+			}
 			err = wait()
 			utils.ClosePTY(sessionID)
 			if config.Logger != nil {
@@ -169,6 +277,17 @@ func (a *DSLApp) runSteps(config *InstallConfig, conditional bool) error {
 	}
 
 	return nil
+}
+
+func stripANSI(s string) string {
+	if s == "" {
+		return s
+	}
+	// Remove OSC first, then CSI, then remaining control chars.
+	s = ansiOSC.ReplaceAllString(s, "")
+	s = ansiCSI.ReplaceAllString(s, "")
+	s = controlChars.ReplaceAllString(s, "")
+	return s
 }
 
 func (a *DSLApp) PrintSummary(ip, domain string) {
@@ -235,9 +354,52 @@ func (a *DSLApp) DNSRecords(domain string, serverIP string) []DNSRecord {
 	return out
 }
 
+func (a *DSLApp) WizardQuestions() []WizardQuestion {
+	qs := a.spec.Wizard.Steps.Application.CustomQuestions
+	if len(qs) == 0 {
+		return nil
+	}
+
+	out := make([]WizardQuestion, 0, len(qs))
+	for _, q := range qs {
+		id := strings.TrimSpace(q.ID)
+		if id == "" {
+			id = slugify(q.Name)
+		}
+		wq := WizardQuestion{
+			ID:       id,
+			Name:     q.Name,
+			Type:     strings.ToLower(strings.TrimSpace(q.Type)),
+			Required: q.Required,
+			Default:  q.Default,
+		}
+		if len(q.Choices) > 0 {
+			wq.Choices = make([]WizardChoice, 0, len(q.Choices))
+			for _, c := range q.Choices {
+				wq.Choices = append(wq.Choices, WizardChoice{
+					Name:    c.Name,
+					Default: c.Default,
+				})
+			}
+		}
+		out = append(out, wq)
+	}
+	return out
+}
+
 func randomID() string {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
 	// URL-safe-ish without extra deps
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = nonAlnum.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		return "q"
+	}
+	return s
 }

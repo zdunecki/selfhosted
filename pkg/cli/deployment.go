@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/zdunecki/selfhosted/pkg/apps"
@@ -10,25 +11,76 @@ import (
 	"github.com/zdunecki/selfhosted/pkg/providers"
 )
 
+func buildWizardExtraVars(answers map[string]interface{}) map[string]string {
+	if len(answers) == 0 {
+		return nil
+	}
+
+	// Stable order is nice for debugging, but map output is ultimately unordered; we only use it for template replacement.
+	keys := make([]string, 0, len(answers))
+	for k := range answers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := map[string]string{}
+	for _, k := range keys {
+		v := answers[k]
+		out[fmt.Sprintf("{wizard.steps.application.values.custom_questions.%s}", k)] = wizardValueToString(v)
+	}
+	return out
+}
+
+func wizardValueToString(v interface{}) string {
+	switch t := v.(type) {
+	case bool:
+		if t {
+			return "y"
+		}
+		return "n"
+	case string:
+		return t
+	case []interface{}:
+		// Default: join with commas (apps can instead use the frontend automation for complex TUIs).
+		parts := make([]string, 0, len(t))
+		for _, x := range t {
+			parts = append(parts, wizardValueToString(x))
+		}
+		return strings.Join(parts, ",")
+	case float64:
+		// JSON numbers decode as float64
+		if float64(int64(t)) == t {
+			return fmt.Sprintf("%d", int64(t))
+		}
+		return fmt.Sprintf("%v", t)
+	default:
+		if v == nil {
+			return ""
+		}
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 // DeployOptions holds all deployment configuration
 type DeployOptions struct {
-	ProviderName           string `json:"provider"`
-	AppName                string `json:"app"`
-	Region                 string `json:"region"`
-	Size                   string `json:"size"`
-	Domain                 string `json:"domain"`
-	DeployName             string `json:"deploy_name"`
-	SSHKeyPath             string `json:"ssh_key_path"`
-	SSHPubKey              string `json:"ssh_pub_key"`
-	EnableSSL              bool   `json:"enable_ssl"`
-	Email                  string `json:"email"`
-	SSLPrivateKeyFile      string `json:"ssl_private_key_file"`
-	SSLCertificateCrt      string `json:"ssl_certificate_crt"`
-	HttpToHttpsRedirection bool   `json:"http_to_https_redirection"`
-	DNSSetupMode           string `json:"dns_setup_mode"`
-	CloudflareToken        string `json:"cloudflare_token"`     // Cloudflare API token (if provided by user)
-	CloudflareZoneName     string `json:"cloudflare_zone_name"` // Cloudflare zone name if using Cloudflare DNS
-	CloudflareProxied      bool   `json:"cloudflare_proxied"`   // Whether to enable Cloudflare proxy
+	ProviderName           string                 `json:"provider"`
+	AppName                string                 `json:"app"`
+	Region                 string                 `json:"region"`
+	Size                   string                 `json:"size"`
+	Domain                 string                 `json:"domain"`
+	DeployName             string                 `json:"deploy_name"`
+	SSHKeyPath             string                 `json:"ssh_key_path"`
+	SSHPubKey              string                 `json:"ssh_pub_key"`
+	EnableSSL              bool                   `json:"enable_ssl"`
+	Email                  string                 `json:"email"`
+	SSLPrivateKeyFile      string                 `json:"ssl_private_key_file"`
+	SSLCertificateCrt      string                 `json:"ssl_certificate_crt"`
+	HttpToHttpsRedirection bool                   `json:"http_to_https_redirection"`
+	DNSSetupMode           string                 `json:"dns_setup_mode"`
+	CloudflareToken        string                 `json:"cloudflare_token"`     // Cloudflare API token (if provided by user)
+	CloudflareZoneName     string                 `json:"cloudflare_zone_name"` // Cloudflare zone name if using Cloudflare DNS
+	CloudflareProxied      bool                   `json:"cloudflare_proxied"`   // Whether to enable Cloudflare proxy
+	WizardAnswers          map[string]interface{} `json:"wizard_answers"`       // optional UI answers for interactive installers
 }
 
 // Deploy executes a deployment with the given options
@@ -234,6 +286,7 @@ func Deploy(opts DeployOptions, logf func(string, ...interface{})) error {
 		SSLCertificateCrt:      opts.SSLCertificateCrt,
 		HttpToHttpsRedirection: opts.HttpToHttpsRedirection,
 		Logger:                 logf, // Pass logger to capture all installation logs
+		ExtraVars:              buildWizardExtraVars(opts.WizardAnswers),
 	}
 
 	err = app.Install(installConfig)

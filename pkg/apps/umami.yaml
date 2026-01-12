@@ -1,0 +1,107 @@
+app: umami
+description: Umami - simple, fast, privacy-focused web analytics (Postgres + HTTPS via Caddy)
+os: ubuntu-24-04-x64
+dns:
+  records:
+    # Caddy needs direct access for ACME HTTP-01 validation.
+    # If you use Cloudflare, keep this record DNS-only (not proxied) during issuance.
+    - type: A
+      name: "{opts.Domain}"
+      proxied: false
+min_spec:
+  cpu: 2
+  ram: 2gib
+  disk: 20gib
+providers:
+  - digitalocean
+
+wizard:
+  domain_hint: "Example: umami.your-domain.com"
+
+steps:
+  - name: Prepare server
+    in: machine
+    run: |
+      cloud-init status --wait || true
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl
+
+  - name: Install Docker + Compose
+    in: machine
+    run: |
+      curl -fsSL https://get.docker.com | sh
+      docker compose version || (apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin)
+
+  - name: Configure Umami (compose + Caddy)
+    in: machine
+    run: |
+      mkdir -p /opt/umami
+      cd /opt/umami
+
+      # Secrets
+      POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+      APP_SECRET="$(openssl rand -base64 64 | tr -d '\n')"
+      HASH_SALT="$(openssl rand -base64 32 | tr -d '\n')"
+
+      cat > .env << EOF
+      DOMAIN={opts.Domain}
+      POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      APP_SECRET=${APP_SECRET}
+      HASH_SALT=${HASH_SALT}
+      EOF
+
+      # Caddy reverse proxy terminates TLS for your DOMAIN and forwards to Umami.
+      cat > Caddyfile << 'EOF'
+      {$DOMAIN} {
+        reverse_proxy umami:3000
+      }
+      EOF
+
+      # Postgres + Umami + Caddy
+      cat > compose.yml << 'EOF'
+      services:
+        db:
+          image: postgres:16
+          restart: unless-stopped
+          environment:
+            POSTGRES_DB: umami
+            POSTGRES_USER: umami
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+          volumes:
+            - db_data:/var/lib/postgresql/data
+
+        umami:
+          image: docker.umami.is/umami-software/umami:postgresql-latest
+          restart: unless-stopped
+          depends_on:
+            - db
+          environment:
+            DATABASE_URL: postgresql://umami:${POSTGRES_PASSWORD}@db:5432/umami
+            APP_SECRET: ${APP_SECRET}
+            HASH_SALT: ${HASH_SALT}
+
+        caddy:
+          image: caddy:2
+          restart: unless-stopped
+          depends_on:
+            - umami
+          ports:
+            - "80:80"
+            - "443:443"
+          volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+            - caddy_data:/data
+            - caddy_config:/config
+
+      volumes:
+        db_data:
+        caddy_data:
+        caddy_config:
+      EOF
+
+  - name: Start Umami (Docker Compose)
+    in: machine
+    run: |
+      cd /opt/umami
+      docker compose up -d
+      docker compose ps

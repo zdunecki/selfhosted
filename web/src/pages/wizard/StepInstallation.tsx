@@ -8,6 +8,9 @@ interface StepInstallationProps {
     logs: string[]
     ptySessionId: string
     ptyChunksB64: string[]
+    hasTTYAutomation: boolean
+    ttyAutoAnswering: boolean
+    onAutoAnswerTTY: () => Promise<void>
     deployError: string | null
     deployComplete: boolean
     deployedUrl: string
@@ -23,6 +26,9 @@ export function StepInstallation({
     logs,
     ptySessionId,
     ptyChunksB64,
+    hasTTYAutomation,
+    ttyAutoAnswering,
+    onAutoAnswerTTY,
     deployError,
     deployComplete,
     deployedUrl,
@@ -121,6 +127,24 @@ export function StepInstallation({
                 {showFullLogs ? (
                     ptySessionId ? (
                         <div className="h-full p-2 bg-[#0b0b0f]">
+                            {hasTTYAutomation && (
+                                <div className="mb-2 flex items-center justify-between rounded-lg border border-zinc-700/40 bg-zinc-900/40 px-3 py-2">
+                                    <div className="text-xs text-zinc-200">
+                                        Interactive setup detected. You can auto-answer from your selected options, or type manually.
+                                    </div>
+                                    <button
+                                        onClick={onAutoAnswerTTY}
+                                        disabled={ttyAutoAnswering}
+                                        className={`text-xs px-3 py-1.5 rounded-md transition-colors border
+                                            ${ttyAutoAnswering
+                                                ? 'bg-zinc-800 text-zinc-400 border-zinc-700 cursor-not-allowed'
+                                                : 'bg-[#F38020] text-white border-[#F38020] hover:bg-[#F38020]/90'}
+                                        `}
+                                    >
+                                        {ttyAutoAnswering ? 'Auto-answering…' : 'Auto-answer setup'}
+                                    </button>
+                                </div>
+                            )}
                             <InteractiveTerminal sessionId={ptySessionId} chunksB64={ptyChunksB64} />
                         </div>
                     ) : (

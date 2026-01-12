@@ -1,3 +1,7 @@
 apps:
  - openreplay.yaml
  - openpanel.yaml
+ - plausible.yaml
+ - umami.yaml
+ - swetrix.yaml
+ - rybbit.yaml

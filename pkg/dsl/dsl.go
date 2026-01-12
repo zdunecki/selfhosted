@@ -40,14 +40,15 @@ func (s *SizeGB) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Spec struct {
-	App         string   `yaml:"app"`
-	Description string   `yaml:"description"`
-	OS          string   `yaml:"os"`
-	DomainHint  string   `yaml:"domain_hint"`
-	MinSpec     SpecHW   `yaml:"min_spec"`
-	Providers   []string `yaml:"providers"`
-	DNS         DNSSpec  `yaml:"dns"`
-	Steps       []Step   `yaml:"steps"`
+	App         string     `yaml:"app"`
+	Description string     `yaml:"description"`
+	OS          string     `yaml:"os"`
+	DomainHint  string     `yaml:"domain_hint"`
+	MinSpec     SpecHW     `yaml:"min_spec"`
+	Providers   []string   `yaml:"providers"`
+	DNS         DNSSpec    `yaml:"dns"`
+	Wizard      WizardSpec `yaml:"wizard"`
+	Steps       []Step     `yaml:"steps"`
 }
 
 type DNSSpec struct {
@@ -64,6 +65,33 @@ type DNSRecordSpec struct {
 	Proxied *bool  `yaml:"proxied"` // nil means "use global default"
 }
 
+type WizardSpec struct {
+	DomainHint string      `yaml:"domain_hint"`
+	Steps      WizardSteps `yaml:"steps"`
+}
+
+type WizardSteps struct {
+	Application WizardApplicationStep `yaml:"application"`
+}
+
+type WizardApplicationStep struct {
+	CustomQuestions []WizardQuestionSpec `yaml:"custom_questions"`
+}
+
+type WizardQuestionSpec struct {
+	ID       string             `yaml:"id"`
+	Name     string             `yaml:"name"`
+	Type     string             `yaml:"type"` // boolean | text | choice
+	Default  interface{}        `yaml:"default"`
+	Required bool               `yaml:"required"`
+	Choices  []WizardChoiceSpec `yaml:"choices"`
+}
+
+type WizardChoiceSpec struct {
+	Name    string      `yaml:"name"`
+	Default interface{} `yaml:"default"`
+}
+
 type SpecHW struct {
 	CPU  int    `yaml:"cpu"`
 	RAM  SizeMB `yaml:"ram"`
@@ -71,13 +99,64 @@ type SpecHW struct {
 }
 
 type Step struct {
-	Name  string `yaml:"name"`
-	In    string `yaml:"in"` // Where to run the step (e.g., "machine")
-	If    string `yaml:"if"`
-	Run   string `yaml:"run"`
-	TTY   bool   `yaml:"tty"` // Run step in a PTY (interactive/TUI)
-	Sleep string `yaml:"sleep"`
-	Log   string `yaml:"log"`
+	Name  string  `yaml:"name"`
+	In    string  `yaml:"in"` // Where to run the step (e.g., "machine")
+	If    string  `yaml:"if"`
+	Run   string  `yaml:"run"`
+	TTY   TTYSpec `yaml:"tty"` // Run step in a PTY (interactive/TUI)
+	Sleep string  `yaml:"sleep"`
+	Log   string  `yaml:"log"`
+}
+
+type TTYSpec struct {
+	Enabled    bool        `yaml:"-"`
+	AutoAnswer []TTYAnswer `yaml:"auto_answer"`
+}
+
+type TTYAnswer struct {
+	// Value is a string that will be rendered with template vars and then sent to the PTY.
+	// If it doesn't contain a newline/CR, we will append Enter automatically.
+	Value string `yaml:"value"`
+	// WaitFor waits until the PTY output contains this substring (or regex, see WaitForRegex) before sending.
+	WaitFor string `yaml:"wait_for"`
+	// WaitForRegex treats WaitFor as a regexp when true.
+	WaitForRegex bool `yaml:"wait_for_regex"`
+	// TimeoutMS is max time to wait for WaitFor before giving up on this answer (0 => default 10min).
+	TimeoutMS int `yaml:"timeout_ms"`
+	// DelayMS waits before sending this answer (optional).
+	DelayMS int `yaml:"delay_ms"`
+}
+
+// UnmarshalYAML allows:
+//   - tty: true
+//   - tty: false
+//   - tty:
+//     auto_answer: ...
+func (t *TTYSpec) UnmarshalYAML(node *yaml.Node) error {
+	// Reset
+	*t = TTYSpec{}
+	if node == nil {
+		return nil
+	}
+
+	// Scalar bool form
+	if node.Kind == yaml.ScalarNode {
+		var b bool
+		if err := node.Decode(&b); err == nil {
+			t.Enabled = b
+			return nil
+		}
+	}
+
+	// Mapping form
+	type raw TTYSpec
+	var tmp raw
+	if err := node.Decode(&tmp); err != nil {
+		return err
+	}
+	*t = TTYSpec(tmp)
+	t.Enabled = true
+	return nil
 }
 
 type Loader struct {
@@ -191,7 +270,7 @@ func RunSteps(r Runner, steps []Step, vars map[string]string, bools map[string]b
 		}
 		if strings.TrimSpace(step.Run) != "" && r.Run != nil {
 			cmd := BuildRunCommand(RenderTemplate(step.Run, vars))
-			if step.TTY && r.RunPTY != nil {
+			if step.TTY.Enabled && r.RunPTY != nil {
 				_, wait, err := r.RunPTY(cmd, nil)
 				if err != nil {
 					return err

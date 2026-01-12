@@ -523,6 +523,14 @@ func (m wizardModel) loadSizes() ([]providers.Size, error) {
 	if err != nil {
 		return nil, err
 	}
+	type sizesByRegion interface {
+		ListSizesForRegion(region string) ([]providers.Size, error)
+	}
+	if m.opts.Region != "" {
+		if sp, ok := provider.(sizesByRegion); ok {
+			return sp.ListSizesForRegion(m.opts.Region)
+		}
+	}
 	return provider.ListSizes()
 }
 

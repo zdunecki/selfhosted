@@ -1,0 +1,115 @@
+app: swetrix
+description: Swetrix - open-source, privacy-focused analytics (ClickHouse + Redis + HTTPS via Caddy)
+os: ubuntu-24-04-x64
+dns:
+  records:
+    # Caddy needs direct access for ACME HTTP-01 validation.
+    # If you use Cloudflare, keep these records DNS-only (not proxied) during issuance.
+    - type: A
+      name: "{opts.Domain}"
+      proxied: false
+    - type: A
+      name: "api.{opts.Domain}"
+      proxied: false
+min_spec:
+  cpu: 2
+  ram: 2gib
+  disk: 20gib
+providers:
+  - digitalocean
+
+wizard:
+  domain_hint: "Example: swetrix.your-domain.com"
+
+steps:
+  - name: Prepare server
+    in: machine
+    run: |
+      cloud-init status --wait || true
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get install -y git curl ca-certificates openssl
+
+  - name: Install Docker + Compose
+    in: machine
+    run: |
+      curl -fsSL https://get.docker.com | sh
+      docker compose version || (apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin)
+
+  - name: Clone Swetrix selfhosting
+    in: machine
+    run: |
+      rm -rf /opt/swetrix || true
+      mkdir -p /opt
+      git clone https://github.com/swetrix/selfhosting /opt/swetrix
+
+  - name: Configure Swetrix (.env + HTTPS)
+    in: machine
+    run: |
+      cd /opt/swetrix
+
+      SECRET_KEY_BASE="$(openssl rand -base64 48 | tr -d '\n')"
+
+      cat > .env << EOF
+      # Swetrix Frontend configuration
+      API_URL=https://api.{opts.Domain}
+
+      # Swetrix API configuration
+      SECRET_KEY_BASE=${SECRET_KEY_BASE}
+      DISABLE_REGISTRATION=true
+      DEBUG_MODE=false
+      IP_GEOLOCATION_DB_PATH=
+      CLOUDFLARE_PROXY_ENABLED=false
+
+      # Keep these empty unless you manually set passwords for your databases
+      REDIS_PASSWORD=
+      CLICKHOUSE_PASSWORD=
+      EOF
+
+      # Remove default host port bindings (80 and 8080) and run behind Caddy on 80/443.
+      cat > compose.override.yml << 'EOF'
+      services:
+        swetrix:
+          ports: []
+
+        swetrix-api:
+          ports: []
+
+        caddy:
+          image: caddy:2
+          restart: unless-stopped
+          depends_on:
+            - swetrix
+            - swetrix-api
+          ports:
+            - "80:80"
+            - "443:443"
+          environment:
+            DOMAIN: "{opts.Domain}"
+          volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+            - caddy_data:/data
+            - caddy_config:/config
+
+      volumes:
+        caddy_data:
+        caddy_config:
+      EOF
+
+      # Serve UI on DOMAIN and API on api.DOMAIN.
+      cat > Caddyfile << 'EOF'
+      {$DOMAIN} {
+        reverse_proxy swetrix:3000
+      }
+
+      api.{$DOMAIN} {
+        header_up X-Real-IP {remote_host}
+        reverse_proxy swetrix-api:5005
+      }
+      EOF
+
+  - name: Start Swetrix (Docker Compose)
+    in: machine
+    run: |
+      cd /opt/swetrix
+      docker compose up -d
+      docker compose ps

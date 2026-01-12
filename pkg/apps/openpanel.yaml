@@ -1,10 +1,9 @@
 app: openpanel
 description: OpenPanel - Open-source analytics (self-hosted)
 os: ubuntu-24-04-x64
-domain_hint: "Example: openpanel.your-domain.com"
 dns:
   records:
-    # OpenPanel uses an additional worker subdomain; keep these DNS-only (no proxy).
+    # OpenPanel uses an additional worker subdomain.
     - type: A
       name: "{opts.Domain}"
       proxied: false
@@ -22,16 +21,52 @@ wizard:
   domain_hint: "Example: openpanel.your-domain.com"
   steps:
     application:
-      configuration:
+      custom_questions:
         - name: Node.js installation
+          id: node.js_installation
           type: boolean
           default: true
           required: true
 
         - name: Docker installation
+          id: docker_installation
           type: boolean
           default: true
           required: true
+
+        - name: Dependencies
+          id: dependencies
+          type: choice
+          choices:
+            - name: Clickhouse
+              default: true
+            - name: Redis
+              default: true
+            - name: PostgreSQL
+              default: true
+          required: true
+
+        - name: SSL
+          id: ssl
+          type: choice
+          choices:
+            - name: Caddy
+              default: true
+            - name: Custom
+              default: false
+          required: true
+
+        - name: Resend
+          id: resend
+          type: text
+          default: ""
+          required: false
+
+        - name: Basic auth password
+          id: basic_auth_password
+          type: text
+          default: ""
+          required: false
 
 steps:
   - name: Prepare server
@@ -52,10 +87,48 @@ steps:
 
   - name: OpenPanel setup (interactive)
     in: machine
-    tty: true
+    # tty: true
+    tty:
+      auto_answer:
+        - wait_for: "Do you wish to automatically install Node.js"
+          value: "{wizard.steps.application.values.custom_questions.node.js_installation}"
+
+        - wait_for: "Do you wish to install Docker"
+          value: "{wizard.steps.application.values.custom_questions.docker_installation}"
+
+        # Ubuntu sometimes shows a needrestart dialog during Docker install; accept defaults.
+        - wait_for_regex: true
+          wait_for: "(Daemons using outdated|Which services should be restarted\\?)"
+          value: "\t\r"
+
+        # Inquirer prompt expects http(s):// prefix.
+        - wait_for_regex: true
+          wait_for: "What's the domain name you want to use\\?"
+          value: "https://{opts.Domain}"
+
+        # For inquirer prompts, accepting defaults is often enough (just press Enter).
+        - wait_for_regex: true
+          wait_for: "Which of these dependencies will you need us to install\\?"
+          value: "\r"
+
+        - wait_for_regex: true
+          wait_for: "Do you already have a web service setup.*install Caddy with SSL\\?"
+          value: "\r"
+
+        - wait_for_regex: true
+          wait_for: "How many workers do you want to spawn"
+          value: "\r"
+
+        - wait_for_regex: true
+          wait_for: "Enter your Resend API key"
+          value: "{wizard.steps.application.values.custom_questions.resend}"
+
+        - wait_for_regex: true
+          wait_for: "Give a password for basic auth"
+          value: "{wizard.steps.application.values.custom_questions.basic_auth_password}"
     run: |
       cd /opt/openpanel/self-hosting
-      ./setup
+      NEEDRESTART_MODE=a ./setup
 
   - name: Start OpenPanel
     in: machine
