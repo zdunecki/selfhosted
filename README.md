@@ -29,10 +29,10 @@ A modern CLI tool to deploy self-hosted applications to multiple cloud providers
 | Provider | Icon | Description |
 |----------|------|-------------|
 | **DigitalOcean** | <img src="web/public/digitalocean.svg" width="20" height="20"> | Developer-friendly cloud hosting |
-| **Scaleway** | <img src="web/public/scaleway.svg" width="20" height="20"> | European cloud hosting (Go SDK) |
-| **UpCloud** | <img src="web/public/upcloud.svg" width="20" height="20"> | European cloud hosting (Go SDK) |
-| **Vultr** | <img src="web/public/vultr.svg" width="20" height="20"> | Global cloud hosting (Go SDK) |
-| **Google Cloud Platform** | <img src="web/public/gcloud.svg" width="20" height="20"> | Enterprise cloud hosting (GCP) |
+| **Scaleway** | <img src="web/public/scaleway.svg" width="20" height="20"> | European cloud hosting|
+| **UpCloud** | <img src="web/public/upcloud.svg" width="20" height="20"> | European cloud hosting|
+| **Vultr** | <img src="web/public/vultr.svg" width="20" height="20"> | Global cloud hosting |
+| **Google Cloud Platform** | <img src="web/public/gcloud.svg" width="20" height="20"> | High-performance infrastructure for cloud computing |
 
 ## Installation
 
