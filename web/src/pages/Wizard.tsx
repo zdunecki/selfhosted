@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useWizardData } from '../hooks/useWizardData'
 import { InstallerLayout, type Step } from '../components/InstallerLayout'
 import { StepApplication } from './wizard/StepApplication'
@@ -6,7 +6,7 @@ import { StepCloudProvider } from './wizard/StepCloudProvider'
 import { StepDNS } from './wizard/StepDNS'
 import { StepReview } from './wizard/StepReview'
 import { StepInstallation } from './wizard/StepInstallation'
-import type { WizardState, WizardActions, Region, Size } from './wizard/types'
+import type { WizardState, WizardActions, Region, Size, GCPBillingAccount, GCPProject } from './wizard/types'
 import { encryptForServer } from '../utils/crypto'
 
 // Step definitions
@@ -61,6 +61,21 @@ export function Wizard() {
     const [sizes, setSizes] = useState<Size[]>([])
     const [regionsLoading, setRegionsLoading] = useState(false)
     const [sizesLoading, setSizesLoading] = useState(false)
+
+    // GCP billing accounts
+    const [gcpBillingAccounts, setGcpBillingAccounts] = useState<GCPBillingAccount[]>([])
+    const [gcpBillingAccount, setGcpBillingAccount] = useState<string>('')
+    const [gcpBillingAccountsLoading, setGcpBillingAccountsLoading] = useState(false)
+    const [gcpBillingAccountsError, setGcpBillingAccountsError] = useState<string | null>(null)
+
+    // GCP project selection mode
+    const [gcpProjectMode, setGcpProjectMode] = useState<'existing' | 'new'>('existing')
+    const [gcpProjects, setGcpProjects] = useState<GCPProject[]>([])
+    const [gcpProjectId, setGcpProjectId] = useState<string>('')
+    const [gcpProjectsLoading, setGcpProjectsLoading] = useState(false)
+    const [gcpProjectsError, setGcpProjectsError] = useState<string | null>(null)
+
+    const lastSavedGcpConfigKeyRef = useRef<string>('')
 
     // Derived State
     const selectedApp = apps.find(a => a.name === appName)
@@ -241,6 +256,114 @@ export function Wizard() {
         }
     }, [appName, serverName])
 
+    // GCP billing accounts + projects discovery
+    useEffect(() => {
+        const p = providerName.toLowerCase()
+        if (p !== 'gcp') {
+            setGcpBillingAccounts([])
+            setGcpBillingAccount('')
+            setGcpBillingAccountsLoading(false)
+            setGcpBillingAccountsError(null)
+            setGcpProjectMode('existing')
+            setGcpProjects([])
+            setGcpProjectId('')
+            setGcpProjectsLoading(false)
+            setGcpProjectsError(null)
+            lastSavedGcpConfigKeyRef.current = ''
+            return
+        }
+
+        let cancelled = false
+        const runBilling = async () => {
+            setGcpBillingAccountsLoading(true)
+            setGcpBillingAccountsError(null)
+            try {
+                const res = await fetch('/api/providers/gcp/billing-accounts')
+                if (!res.ok) throw new Error(await res.text())
+                const accounts = (await res.json()) as GCPBillingAccount[]
+                if (cancelled) return
+                setGcpBillingAccounts(accounts || [])
+
+                // Prefer open accounts; if exactly one open account exists, auto-select and save.
+                const open = (accounts || []).filter(a => a.open)
+                if (gcpProjectMode === 'new' && !gcpBillingAccount) {
+                    if (open.length === 1) {
+                        setGcpBillingAccount(open[0].name)
+                        // Fire-and-forget save so backend has billing_account set for new project creation.
+                        void fetch('/api/providers/config', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                provider: providerName,
+                                config: { billing_account: open[0].name, create_project: 'true' },
+                            }),
+                        })
+                    }
+                }
+            } catch (err) {
+                if (cancelled) return
+                const msg = err instanceof Error ? err.message : String(err)
+                setGcpBillingAccountsError(msg || 'Failed to load billing accounts')
+            } finally {
+                if (!cancelled) setGcpBillingAccountsLoading(false)
+            }
+        }
+
+        const runProjects = async () => {
+            setGcpProjectsLoading(true)
+            setGcpProjectsError(null)
+            try {
+                const res = await fetch('/api/providers/gcp/projects')
+                if (!res.ok) throw new Error(await res.text())
+                const projects = (await res.json()) as GCPProject[]
+                if (cancelled) return
+                setGcpProjects(projects || [])
+            } catch (err) {
+                if (cancelled) return
+                const msg = err instanceof Error ? err.message : String(err)
+                setGcpProjectsError(msg || 'Failed to load projects')
+            } finally {
+                if (!cancelled) setGcpProjectsLoading(false)
+            }
+        }
+
+        runBilling()
+        runProjects()
+        return () => {
+            cancelled = true
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [providerName, gcpProjectMode])
+
+    // Auto-save GCP selection so deploy always uses the chosen mode (prevents "existing selected but backend still creating new").
+    useEffect(() => {
+        if (providerName.toLowerCase() !== 'gcp' || showConfig) return
+
+        const key =
+            gcpProjectMode === 'existing'
+                ? `existing:${gcpProjectId}`
+                : `new:${gcpBillingAccount}`
+
+        // Only save when the required value is present.
+        if (gcpProjectMode === 'existing' && !gcpProjectId) return
+        if (gcpProjectMode === 'new' && !gcpBillingAccount) return
+
+        if (lastSavedGcpConfigKeyRef.current === key) return
+        lastSavedGcpConfigKeyRef.current = key
+
+        void fetch('/api/providers/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                provider: providerName,
+                config:
+                    gcpProjectMode === 'existing'
+                        ? { project_id: gcpProjectId, create_project: 'false' }
+                        : { billing_account: gcpBillingAccount, create_project: 'true' },
+            }),
+        })
+    }, [providerName, showConfig, gcpProjectMode, gcpProjectId, gcpBillingAccount])
+
 
     // Step Validation
     const canProceed = () => {
@@ -248,7 +371,13 @@ export function Wizard() {
             case 0: // App
                 return !!(appName && serverName)
             case 1: // Cloud
-                return !!(providerName && region && size && !showConfig)
+                if (!providerName || !region || !size || showConfig) return false
+                if (providerName.toLowerCase() === 'gcp') {
+                    // Required selection: either existing project OR new project + billing account.
+                    if (gcpProjectMode === 'existing') return !!gcpProjectId
+                    return !!gcpBillingAccount
+                }
+                return true
             case 2: // DNS
                 if (dnsMode === 'auto') {
                     return !!(domainAuto && detectedDomainProvider === 'cloudflare' && cloudflareToken && cloudflareTokenVerified)
@@ -360,6 +489,78 @@ export function Wizard() {
         }
     }
 
+    const handleSaveGcpBillingAccount = async () => {
+        if (providerName.toLowerCase() !== 'gcp') return
+        if (!gcpBillingAccount) {
+            alert('Select a billing account to continue.')
+            return
+        }
+        try {
+            const res = await fetch('/api/providers/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider: providerName,
+                    config: {
+                        billing_account: gcpBillingAccount,
+                        create_project: 'true',
+                    },
+                }),
+            })
+            if (!res.ok) throw new Error('Failed to save GCP billing account')
+        } catch (err) {
+            console.error('Failed to save GCP billing account:', err)
+            alert('Failed to save GCP billing account. Check server logs / permissions.')
+        }
+    }
+
+    const handleSaveGcpProjectSelection = async () => {
+        if (providerName.toLowerCase() !== 'gcp') return
+
+        try {
+            if (gcpProjectMode === 'existing') {
+                if (!gcpProjectId) {
+                    alert('Select an existing project to continue.')
+                    return
+                }
+                const res = await fetch('/api/providers/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        provider: providerName,
+                        config: {
+                            project_id: gcpProjectId,
+                            create_project: 'false',
+                        },
+                    }),
+                })
+                if (!res.ok) throw new Error(await res.text())
+                return
+            }
+
+            // New project
+            if (!gcpBillingAccount) {
+                alert('Select a billing account to continue.')
+                return
+            }
+            const res = await fetch('/api/providers/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider: providerName,
+                    config: {
+                        billing_account: gcpBillingAccount,
+                        create_project: 'true',
+                    },
+                }),
+            })
+            if (!res.ok) throw new Error(await res.text())
+        } catch (err) {
+            console.error('Failed to save GCP project selection:', err)
+            alert('Failed to save GCP project selection. Check server logs / permissions.')
+        }
+    }
+
     const handleVerifyCloudflareToken = async () => {
         if (!cloudflareToken.trim()) {
             setCloudflareTokenError('Please enter a Cloudflare API token')
@@ -440,6 +641,15 @@ export function Wizard() {
         sizes,
         regionsLoading,
         sizesLoading,
+        gcpBillingAccounts,
+        gcpBillingAccount,
+        gcpBillingAccountsLoading,
+        gcpBillingAccountsError,
+        gcpProjectMode,
+        gcpProjects,
+        gcpProjectId,
+        gcpProjectsLoading,
+        gcpProjectsError,
         selectedApp,
         selectedProvider,
         appWizardAnswers,
@@ -461,6 +671,11 @@ export function Wizard() {
         setCloudflareAccountId,
         handleSaveToken,
         handleVerifyCloudflareToken,
+        setGcpBillingAccount,
+        handleSaveGcpBillingAccount,
+        setGcpProjectMode,
+        setGcpProjectId,
+        handleSaveGcpProjectSelection,
         setAppWizardAnswer: (id: string, value: any) => {
             setAppWizardAnswers(prev => ({ ...prev, [id]: value }))
         },

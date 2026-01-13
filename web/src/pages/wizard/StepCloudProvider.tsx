@@ -109,6 +109,110 @@ export function StepCloudProvider({ providers, state, actions, getProviderLogo }
             {state.providerName && !state.showConfig && (
                 <div ref={regionSectionRef} className="animate-in fade-in slide-in-from-bottom-2 duration-300">
                     <h2 className="text-lg font-medium text-zinc-900 mb-4">Region</h2>
+
+                    {/* GCP project mode + billing/project selection */}
+                    {state.providerName.toLowerCase() === 'gcp' && (
+                        <div className="mb-6 bg-white border border-zinc-200 rounded-xl p-4">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <div className="text-sm font-medium text-zinc-900">GCP project</div>
+                                    <div className="text-xs text-zinc-600 mt-1">
+                                        Choose whether to deploy into an <span className="font-medium">existing project</span> (recommended) or create a <span className="font-medium">new project</span>.
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={actions.handleSaveGcpProjectSelection}
+                                    className="px-3 py-2 bg-zinc-900 hover:bg-zinc-800 text-white rounded-lg text-xs font-medium transition-colors"
+                                >
+                                    Save
+                                </button>
+                            </div>
+
+                            <div className="mt-3 flex gap-3">
+                                <button
+                                    onClick={() => actions.setGcpProjectMode('existing')}
+                                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
+                                        state.gcpProjectMode === 'existing'
+                                            ? 'bg-zinc-900 text-white border-zinc-900'
+                                            : 'bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-50'
+                                    }`}
+                                >
+                                    Use existing
+                                </button>
+                                <button
+                                    onClick={() => actions.setGcpProjectMode('new')}
+                                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
+                                        state.gcpProjectMode === 'new'
+                                            ? 'bg-zinc-900 text-white border-zinc-900'
+                                            : 'bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-50'
+                                    }`}
+                                >
+                                    Create new
+                                </button>
+                            </div>
+
+                            {state.gcpProjectMode === 'existing' ? (
+                                state.gcpProjectsLoading ? (
+                                    <div className="mt-3 text-zinc-500 text-sm flex items-center gap-2">
+                                        <div className="w-4 h-4 rounded-full border-2 border-zinc-300 border-t-zinc-600 animate-spin" />
+                                        Fetching projects...
+                                    </div>
+                                ) : state.gcpProjectsError ? (
+                                    <div className="mt-3 text-sm text-red-700">
+                                        Failed to load projects: {state.gcpProjectsError}
+                                    </div>
+                                ) : (
+                                    <div className="mt-3 flex gap-3">
+                                        <div className="w-full">
+                                            <div className="text-xs font-medium text-zinc-700 mb-1">Project (ACTIVE only)</div>
+                                        <select
+                                            className="flex-1 bg-white border border-zinc-300 rounded-lg px-3 py-2 text-zinc-900 focus:ring-2 focus:ring-zinc-500/20 outline-none text-sm"
+                                            value={state.gcpProjectId}
+                                            onChange={e => actions.setGcpProjectId(e.target.value)}
+                                        >
+                                            <option value="">Select project…</option>
+                                            {state.gcpProjects.map(p => (
+                                                <option key={p.projectID} value={p.projectID}>
+                                                    {p.displayName || p.projectID} ({p.projectID})
+                                                </option>
+                                            ))}
+                                        </select>
+                                        </div>
+                                    </div>
+                                )
+                            ) : (
+                                state.gcpBillingAccountsLoading ? (
+                                    <div className="mt-3 text-zinc-500 text-sm flex items-center gap-2">
+                                        <div className="w-4 h-4 rounded-full border-2 border-zinc-300 border-t-zinc-600 animate-spin" />
+                                        Fetching billing accounts...
+                                    </div>
+                                ) : state.gcpBillingAccountsError ? (
+                                    <div className="mt-3 text-sm text-red-700">
+                                        Failed to load billing accounts: {state.gcpBillingAccountsError}
+                                    </div>
+                                ) : (
+                                    <div className="mt-3 flex gap-3">
+                                        <div className="w-full">
+                                            <div className="text-xs font-medium text-zinc-700 mb-1">Billing account (for new project)</div>
+                                        <select
+                                            className="flex-1 bg-white border border-zinc-300 rounded-lg px-3 py-2 text-zinc-900 focus:ring-2 focus:ring-zinc-500/20 outline-none text-sm"
+                                            value={state.gcpBillingAccount}
+                                            onChange={e => actions.setGcpBillingAccount(e.target.value)}
+                                        >
+                                            <option value="">Select billing account…</option>
+                                            {state.gcpBillingAccounts.map(a => (
+                                                <option key={a.name} value={a.name}>
+                                                    {a.display_name || a.name} {a.open ? '' : '(closed)'}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        </div>
+                                    </div>
+                                )
+                            )}
+                        </div>
+                    )}
+
                     {state.regionsLoading ? (
                         <div className="text-zinc-500 text-sm flex items-center gap-2">
                             <div className="w-4 h-4 rounded-full border-2 border-zinc-300 border-t-zinc-600 animate-spin" />

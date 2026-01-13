@@ -65,6 +65,8 @@ func Start(port int) error {
 	http.HandleFunc("/api/pty/input", handlePTYInput)
 	http.HandleFunc("/api/providers", handleListProviders)
 	http.HandleFunc("/api/providers/check", handleCheckProviderCredentials)
+	http.HandleFunc("/api/providers/gcp/billing-accounts", handleGCPBillingAccounts)
+	http.HandleFunc("/api/providers/gcp/projects", handleGCPProjects)
 	http.HandleFunc("/api/regions", handleListRegions)
 	http.HandleFunc("/api/sizes", handleListSizes)
 	http.HandleFunc("/api/deploy", handleDeploy)
@@ -195,6 +197,70 @@ func handleListProviders(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
+func handleGCPBillingAccounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	p, err := providers.Get("gcp")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	g, ok := p.(*providers.GCP)
+	if !ok {
+		http.Error(w, "gcp provider not available", http.StatusInternalServerError)
+		return
+	}
+
+	accounts, err := g.ListBillingAccounts()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(accounts)
+}
+
+func handleGCPProjects(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	p, err := providers.Get("gcp")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	g, ok := p.(*providers.GCP)
+	if !ok {
+		http.Error(w, "gcp provider not available", http.StatusInternalServerError)
+		return
+	}
+
+	projects, err := g.ListProjects()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Only show ACTIVE projects (keeps dropdown usable).
+	active := make([]providers.GCPProject, 0, len(projects))
+	for _, p := range projects {
+		if p.State == "ACTIVE" {
+			active = append(active, p)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(active)
+}
+
 func handleListRegions(w http.ResponseWriter, r *http.Request) {
 	providerName := r.URL.Query().Get("provider")
 	p, err := providers.Get(providerName)
@@ -249,18 +315,18 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	// Parse options
 	var opts struct {
-		App                 string                 `json:"app"`
-		Provider            string                 `json:"provider"`
-		Region              string                 `json:"region"`
-		Size                string                 `json:"size"`
-		Domain              string                 `json:"domain"`
-		Name                string                 `json:"serverName"`
-		DNSMode             string                 `json:"dnsMode"`
-		CloudflareToken     string                 `json:"cloudflareToken" secure:"rsa_oaep_b64" secure_key:"CloudflareTokenKeyID"`
-		CloudflareTokenKeyID string                `json:"cloudflareTokenKeyId"`
-		CloudflareAccountId string                 `json:"cloudflareAccountId"`
-		CloudflareProxied   *bool                  `json:"cloudflareProxied"` // Optional, defaults to true
-		WizardAnswers       map[string]interface{} `json:"wizardAnswers"`
+		App                  string                 `json:"app"`
+		Provider             string                 `json:"provider"`
+		Region               string                 `json:"region"`
+		Size                 string                 `json:"size"`
+		Domain               string                 `json:"domain"`
+		Name                 string                 `json:"serverName"`
+		DNSMode              string                 `json:"dnsMode"`
+		CloudflareToken      string                 `json:"cloudflareToken" secure:"rsa_oaep_b64" secure_key:"CloudflareTokenKeyID"`
+		CloudflareTokenKeyID string                 `json:"cloudflareTokenKeyId"`
+		CloudflareAccountId  string                 `json:"cloudflareAccountId"`
+		CloudflareProxied    *bool                  `json:"cloudflareProxied"` // Optional, defaults to true
+		WizardAnswers        map[string]interface{} `json:"wizardAnswers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

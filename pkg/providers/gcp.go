@@ -21,6 +21,8 @@ import (
 	billingpb "google.golang.org/genproto/googleapis/cloud/billing/v1"
 	computepb "google.golang.org/genproto/googleapis/cloud/compute/v1"
 	resmgrpb "google.golang.org/genproto/googleapis/cloud/resourcemanager/v3"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/status"
 )
 
 // GCP implements Provider for Google Cloud Platform.
@@ -158,8 +160,8 @@ type GCPAuthMethod string
 
 const (
 	GCPAuthServiceAccountJSON GCPAuthMethod = "service_account_json"
-	GCPAuthADC               GCPAuthMethod = "adc"
-	GCPAuthGcloudToken       GCPAuthMethod = "gcloud_access_token"
+	GCPAuthADC                GCPAuthMethod = "adc"
+	GCPAuthGcloudToken        GCPAuthMethod = "gcloud_access_token"
 )
 
 // ResolveGCPTokenSource returns a TokenSource that can be used with GCP clients.
@@ -197,9 +199,15 @@ func ResolveGCPTokenSource(ctx context.Context, credentialsJSON string) (oauth2.
 }
 
 type GCPProject struct {
-	ProjectID   string
-	DisplayName string
-	State       string
+	ProjectID   string `json:"projectID"`
+	DisplayName string `json:"displayName"`
+	State       string `json:"state"`
+}
+
+type GCPBillingAccount struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Open        bool   `json:"open"`
 }
 
 func ListGCPProjects(ctx context.Context, ts oauth2.TokenSource) ([]GCPProject, error) {
@@ -231,6 +239,47 @@ func ListGCPProjects(ctx context.Context, ts oauth2.TokenSource) ([]GCPProject, 
 			State:       p.State.String(),
 		})
 	}
+	return out, nil
+}
+
+func (g *GCP) ListBillingAccounts() ([]GCPBillingAccount, error) {
+	ts, _, err := g.ResolveAuth()
+	if err != nil {
+		return nil, err
+	}
+
+	bc, err := billing.NewCloudBillingClient(g.ctx, option.WithTokenSource(ts))
+	if err != nil {
+		return nil, err
+	}
+	defer bc.Close()
+
+	it := bc.ListBillingAccounts(g.ctx, &billingpb.ListBillingAccountsRequest{})
+	var out []GCPBillingAccount
+	for {
+		acc, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if acc == nil {
+			continue
+		}
+		out = append(out, GCPBillingAccount{
+			Name:        acc.Name,
+			DisplayName: acc.DisplayName,
+			Open:        acc.Open,
+		})
+	}
+	// Prefer open accounts first.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Open != out[j].Open {
+			return out[i].Open
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out, nil
 }
 
@@ -304,6 +353,9 @@ func (g *GCP) CreateServer(config *DeployConfig) (*Server, error) {
 
 	projectID := strings.TrimSpace(g.projectID)
 	createdProject := false
+	if projectID == "" && !g.createProject {
+		return nil, fmt.Errorf("gcp: project_id is required when create_project=false (select an existing project in the wizard)")
+	}
 	if projectID == "" && g.createProject {
 		projectID, err = g.createProjectAndBilling(ts, config.Name)
 		if err != nil {
@@ -326,8 +378,9 @@ func (g *GCP) CreateServer(config *DeployConfig) (*Server, error) {
 		_ = g.ensureServiceEnabled(ts, projectID, "compute.googleapis.com")
 	}
 
-	// Create firewall rule allowing SSH (best-effort; many projects already have it).
+	// Create firewall rules allowing SSH + HTTP/HTTPS (best-effort; required for ACME HTTP-01).
 	_ = g.ensureAllowSSH(ts, projectID)
+	_ = g.ensureAllowHTTPHTTPS(ts, projectID)
 
 	instName := sanitizeHostname(config.Name)
 	if instName == "" {
@@ -399,11 +452,11 @@ func (g *GCP) CreateServer(config *DeployConfig) (*Server, error) {
 			}
 		}
 		if err != nil {
-		if createdProject {
-			// Don't auto-delete project; too risky. Provide hint.
-			return nil, fmt.Errorf("gcp: instance create failed (project=%s created=true): %w", projectID, err)
-		}
-		return nil, err
+			if createdProject {
+				// Don't auto-delete project; too risky. Provide hint.
+				return nil, fmt.Errorf("gcp: instance create failed (project=%s created=true): %w", projectID, err)
+			}
+			return nil, err
 		}
 	}
 	_ = op
@@ -530,8 +583,17 @@ func (g *GCP) createProjectAndBilling(ts oauth2.TokenSource, displayName string)
 			ba = picked
 		}
 	}
-	if ba != "" {
-		_ = g.linkBilling(ts, projectID, ba)
+	if ba == "" {
+		// Without billing enabled, enabling Compute API will fail for most accounts.
+		return "", fmt.Errorf("gcp: billing is not configured for new project %s. Provide billing_account in GCP config (example: billingAccounts/XXXX-XXXX-XXXX) or ensure your credentials can list/select an open billing account", projectID)
+	}
+
+	if err := g.linkBilling(ts, projectID, ba); err != nil {
+		return "", fmt.Errorf("gcp: failed to link billing account %s to project %s: %s", ba, projectID, formatGCPError(err))
+	}
+
+	if err := g.ensureProjectBillingEnabled(ts, projectID); err != nil {
+		return "", err
 	}
 
 	return projectID, nil
@@ -579,13 +641,32 @@ func (g *GCP) linkBilling(ts oauth2.TokenSource, projectID, billingAccount strin
 	defer bc.Close()
 
 	_, err = bc.UpdateProjectBillingInfo(g.ctx, &billingpb.UpdateProjectBillingInfoRequest{
-		Name: fmt.Sprintf("projects/%s/billingInfo", projectID),
+		// Per proto, this is `projects/{project_id}` (not the billingInfo subresource).
+		Name: fmt.Sprintf("projects/%s", projectID),
 		ProjectBillingInfo: &billingpb.ProjectBillingInfo{
 			BillingAccountName: billingAccount,
-			BillingEnabled:     true,
 		},
 	})
 	return err
+}
+
+func (g *GCP) ensureProjectBillingEnabled(ts oauth2.TokenSource, projectID string) error {
+	bc, err := billing.NewCloudBillingClient(g.ctx, option.WithTokenSource(ts))
+	if err != nil {
+		return err
+	}
+	defer bc.Close()
+
+	info, err := bc.GetProjectBillingInfo(g.ctx, &billingpb.GetProjectBillingInfoRequest{
+		Name: fmt.Sprintf("projects/%s/billingInfo", projectID),
+	})
+	if err != nil {
+		return fmt.Errorf("gcp: could not fetch billing status for project %s: %s", projectID, formatGCPError(err))
+	}
+	if info == nil || !info.BillingEnabled {
+		return fmt.Errorf("gcp: billing is not enabled for project %s (billing_account=%s). Enable billing for the project or provide a valid billing_account in config", projectID, strings.TrimSpace(g.billingAccount))
+	}
+	return nil
 }
 
 func (g *GCP) enableService(ts oauth2.TokenSource, projectID, svc string) error {
@@ -616,6 +697,11 @@ func (g *GCP) ensureServiceEnabled(ts oauth2.TokenSource, projectID, svc string)
 	// First attempt to enable. If this errors, we'll still poll GetService (sometimes enable is in-flight),
 	// but we keep the error for better diagnostics.
 	enableErr := g.enableServiceWithCtx(ctx, ts, projectID, svc)
+
+	// If enable fails due to billing not enabled, surface it immediately (polling won't help).
+	if enableErr != nil && strings.Contains(formatGCPError(enableErr), "billing-enabled") {
+		return fmt.Errorf("failed to enable %s for project %s: %s", svc, projectID, formatGCPError(enableErr))
+	}
 
 	// Then wait until it reports enabled (or timeout).
 	return g.waitForServiceEnabled(ctx, ts, projectID, svc, enableErr)
@@ -671,6 +757,47 @@ func isComputeAPIDisabledErr(err error) bool {
 	return false
 }
 
+func formatGCPError(err error) string {
+	if err == nil {
+		return ""
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return err.Error()
+	}
+
+	msg := fmt.Sprintf("%s (code=%s)", st.Message(), st.Code().String())
+	for _, d := range st.Details() {
+		switch x := d.(type) {
+		case *errdetails.ErrorInfo:
+			// Commonly includes reasons like UREQ_PROJECT_BILLING_NOT_FOUND
+			msg += fmt.Sprintf(" | ErrorInfo(reason=%s domain=%s metadata=%v)", x.Reason, x.Domain, x.Metadata)
+		case *errdetails.PreconditionFailure:
+			msg += " | PreconditionFailure("
+			for i, v := range x.Violations {
+				if i > 0 {
+					msg += ", "
+				}
+				msg += fmt.Sprintf("type=%s subject=%s description=%s", v.Type, v.Subject, v.Description)
+			}
+			msg += ")"
+		case *errdetails.QuotaFailure:
+			msg += " | QuotaFailure("
+			for i, v := range x.Violations {
+				if i > 0 {
+					msg += ", "
+				}
+				msg += fmt.Sprintf("subject=%s description=%s", v.Subject, v.Description)
+			}
+			msg += ")"
+		default:
+			// Keep something visible even for unknown detail types.
+			msg += fmt.Sprintf(" | detail=%T", d)
+		}
+	}
+	return msg
+}
+
 func (g *GCP) ensureAllowSSH(ts oauth2.TokenSource, projectID string) error {
 	// Best-effort: create firewall rule allowing TCP/22 to instances tagged "selfhosted" in default network.
 	fc, err := compute.NewFirewallsRESTClient(g.ctx, option.WithTokenSource(ts))
@@ -697,6 +824,37 @@ func (g *GCP) ensureAllowSSH(ts oauth2.TokenSource, projectID string) error {
 			TargetTags:   []string{"selfhosted"},
 			Allowed: []*computepb.Allowed{
 				{IPProtocol: ptr("tcp"), Ports: []string{"22"}},
+			},
+		},
+	})
+	return err
+}
+
+func (g *GCP) ensureAllowHTTPHTTPS(ts oauth2.TokenSource, projectID string) error {
+	// Best-effort: allow TCP/80 and TCP/443 to instances tagged "selfhosted".
+	fc, err := compute.NewFirewallsRESTClient(g.ctx, option.WithTokenSource(ts))
+	if err != nil {
+		return err
+	}
+	defer fc.Close()
+
+	name := "selfhosted-allow-web"
+	_, err = fc.Get(g.ctx, &computepb.GetFirewallRequest{Project: projectID, Firewall: name})
+	if err == nil {
+		return nil
+	}
+
+	net := "global/networks/default"
+	_, err = fc.Insert(g.ctx, &computepb.InsertFirewallRequest{
+		Project: projectID,
+		FirewallResource: &computepb.Firewall{
+			Name:         &name,
+			Network:      &net,
+			Direction:    ptr("INGRESS"),
+			SourceRanges: []string{"0.0.0.0/0"},
+			TargetTags:   []string{"selfhosted"},
+			Allowed: []*computepb.Allowed{
+				{IPProtocol: ptr("tcp"), Ports: []string{"80", "443"}},
 			},
 		},
 	})

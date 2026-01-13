@@ -44,6 +44,18 @@ export interface Provider {
     needs_config?: boolean;
 }
 
+export interface GCPBillingAccount {
+    name: string;
+    display_name: string;
+    open: boolean;
+}
+
+export interface GCPProject {
+    projectID: string;
+    displayName: string;
+    state: string;
+}
+
 export interface WizardState {
     // Form State
     appName: string;
@@ -69,6 +81,18 @@ export interface WizardState {
     sizes: Size[];
     regionsLoading: boolean;
     sizesLoading: boolean;
+
+    // GCP
+    gcpBillingAccounts: GCPBillingAccount[];
+    gcpBillingAccount: string;
+    gcpBillingAccountsLoading: boolean;
+    gcpBillingAccountsError: string | null;
+
+    gcpProjectMode: 'existing' | 'new';
+    gcpProjects: GCPProject[];
+    gcpProjectId: string;
+    gcpProjectsLoading: boolean;
+    gcpProjectsError: string | null;
     
     // Derived
     selectedApp?: App;
@@ -93,6 +117,13 @@ export interface WizardActions {
     setCloudflareAccountId: (accountId: string) => void;
     handleSaveToken: () => Promise<void>;
     handleVerifyCloudflareToken: () => Promise<void>;
+
+    setGcpBillingAccount: (billingAccount: string) => void;
+    handleSaveGcpBillingAccount: () => Promise<void>;
+
+    setGcpProjectMode: (mode: 'existing' | 'new') => void;
+    setGcpProjectId: (projectId: string) => void;
+    handleSaveGcpProjectSelection: () => Promise<void>;
 
     setAppWizardAnswer: (id: string, value: any) => void;
 }
