@@ -4,6 +4,8 @@
 
 A modern CLI tool to deploy self-hosted applications to multiple cloud providers with a single click. Features a beautiful web-based wizard UI and native desktop app wrapper.
 
+![SelfHosted Installer](.github/gif1.gif)
+
 ## Features
 
 - **Multi-provider support**: Deploy to DigitalOcean, Scaleway, UpCloud, Vultr, and Google Cloud Platform
