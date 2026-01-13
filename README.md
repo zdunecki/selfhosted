@@ -17,22 +17,22 @@ A modern CLI tool to deploy self-hosted applications to multiple cloud providers
 
 | App | Icon | Description |
 |-----|------|-------------|
-| **OpenReplay** | ![OpenReplay](web/public/openreplay.svg) | Open-source session replay and product analytics |
-| **OpenPanel** | ![OpenPanel](web/public/openpanel.svg) | Open-source analytics (self-hosted) |
-| **Plausible** | ![Plausible](web/public/plausible.svg) | Lightweight, privacy-friendly web analytics (Docker Compose) |
-| **Umami** | ![Umami](web/public/umami.svg) | Simple, fast, privacy-focused web analytics (Postgres + HTTPS via Caddy) |
-| **Swetrix** | ![Swetrix](web/public/swetrix.png) | Open-source, privacy-focused analytics (ClickHouse + Redis + HTTPS via Caddy) |
-| **Rybbit** | ![Rybbit](web/public/rybbit.svg) | Open-source, privacy-friendly web & product analytics (ClickHouse + Postgres + HTTPS via Caddy) |
+| **OpenReplay** | <img src="web/public/openreplay.svg" width="20" height="20"> | Open-source session replay and product analytics |
+| **OpenPanel** | <img src="web/public/openpanel.svg" width="20" height="20"> | Open-source analytics (self-hosted) |
+| **Plausible** | <img src="web/public/plausible.svg" width="20" height="20"> | Lightweight, privacy-friendly web analytics (Docker Compose) |
+| **Umami** | <img src="web/public/umami.svg" width="20" height="20"> | Simple, fast, privacy-focused web analytics (Postgres + HTTPS via Caddy) |
+| **Swetrix** | <img src="web/public/swetrix.png" width="20" height="20"> | Open-source, privacy-focused analytics (ClickHouse + Redis + HTTPS via Caddy) |
+| **Rybbit** | <img src="web/public/rybbit.svg" width="20" height="20"> | Open-source, privacy-friendly web & product analytics (ClickHouse + Postgres + HTTPS via Caddy) |
 
 ## Supported Cloud Providers
 
 | Provider | Icon | Description |
 |----------|------|-------------|
-| **DigitalOcean** | ![DigitalOcean](web/public/digitalocean.svg) | Developer-friendly cloud hosting |
-| **Scaleway** | ![Scaleway](web/public/scaleway.svg) | European cloud hosting (Go SDK) |
-| **UpCloud** | ![UpCloud](web/public/upcloud.svg) | European cloud hosting (Go SDK) |
-| **Vultr** | ![Vultr](web/public/vultr.svg) | Global cloud hosting (Go SDK) |
-| **Google Cloud Platform** | ![GCP](web/public/gcloud.svg) | Enterprise cloud hosting (GCP) |
+| **DigitalOcean** | <img src="web/public/digitalocean.svg" width="20" height="20"> | Developer-friendly cloud hosting |
+| **Scaleway** | <img src="web/public/scaleway.svg" width="20" height="20"> | European cloud hosting (Go SDK) |
+| **UpCloud** | <img src="web/public/upcloud.svg" width="20" height="20"> | European cloud hosting (Go SDK) |
+| **Vultr** | <img src="web/public/vultr.svg" width="20" height="20"> | Global cloud hosting (Go SDK) |
+| **Google Cloud Platform** | <img src="web/public/gcloud.svg" width="20" height="20"> | Enterprise cloud hosting (GCP) |
 
 ## Installation
 
