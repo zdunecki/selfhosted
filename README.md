@@ -2,7 +2,7 @@
 
 > ⚠️ **Early Stage**: This project is in very early development. Features may be incomplete, APIs may change, and there may be bugs. Use at your own risk.
 
-A modern CLI tool to deploy self-hosted applications to multiple cloud providers with a single click. Features a beautiful web-based wizard UI and native desktop app wrapper.
+A modern tool to deploy self-hosted applications to multiple cloud providers with a single click. Features a beautiful web-based wizard UI and native desktop app wrapper.
 
 ![SelfHosted Installer](.github/gif1.gif)
 
