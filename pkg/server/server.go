@@ -25,7 +25,38 @@ import (
 //go:embed dist
 var frontendDist embed.FS
 
+// corsMiddleware adds CORS headers to allow requests from desktop app (Neutralino dev server)
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		// Allow requests from localhost on any port (for desktop dev server)
+		if origin != "" && (strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:")) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		} else {
+			// For same-origin requests (web mode), allow all
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 func Start(port int) error {
+	return StartWithOptions(port, true)
+}
+
+// StartWithOptions starts the API + SPA server.
+// openInBrowser controls whether the system browser is opened (useful for desktop wrappers).
+func StartWithOptions(port int, openInBrowser bool) error {
 	if err := initSecureKeypair(); err != nil {
 		return fmt.Errorf("init secure keypair: %w", err)
 	}
@@ -60,25 +91,27 @@ func Start(port int) error {
 		fsHandler.ServeHTTP(w, r)
 	})
 
-	// API Endpoints
-	http.HandleFunc("/api/apps", handleListApps)
-	http.HandleFunc("/api/pty/input", handlePTYInput)
-	http.HandleFunc("/api/providers", handleListProviders)
-	http.HandleFunc("/api/providers/check", handleCheckProviderCredentials)
-	http.HandleFunc("/api/providers/gcp/billing-accounts", handleGCPBillingAccounts)
-	http.HandleFunc("/api/providers/gcp/projects", handleGCPProjects)
-	http.HandleFunc("/api/regions", handleListRegions)
-	http.HandleFunc("/api/sizes", handleListSizes)
-	http.HandleFunc("/api/deploy", handleDeploy)
-	http.HandleFunc("/api/providers/config", handleProviderConfig)
-	http.HandleFunc("/api/domains/check", handleDomainCheck)
-	http.HandleFunc("/api/cloudflare/verify", handleCloudflareVerify)
-	http.HandleFunc("/api/crypto/public-key", handlePublicKey)
+	// API Endpoints (with CORS middleware)
+	http.HandleFunc("/api/apps", corsMiddleware(handleListApps))
+	http.HandleFunc("/api/pty/input", corsMiddleware(handlePTYInput))
+	http.HandleFunc("/api/providers", corsMiddleware(handleListProviders))
+	http.HandleFunc("/api/providers/check", corsMiddleware(handleCheckProviderCredentials))
+	http.HandleFunc("/api/providers/gcp/billing-accounts", corsMiddleware(handleGCPBillingAccounts))
+	http.HandleFunc("/api/providers/gcp/projects", corsMiddleware(handleGCPProjects))
+	http.HandleFunc("/api/regions", corsMiddleware(handleListRegions))
+	http.HandleFunc("/api/sizes", corsMiddleware(handleListSizes))
+	http.HandleFunc("/api/deploy", corsMiddleware(handleDeploy))
+	http.HandleFunc("/api/providers/config", corsMiddleware(handleProviderConfig))
+	http.HandleFunc("/api/domains/check", corsMiddleware(handleDomainCheck))
+	http.HandleFunc("/api/cloudflare/verify", corsMiddleware(handleCloudflareVerify))
+	http.HandleFunc("/api/crypto/public-key", corsMiddleware(handlePublicKey))
 
 	url := fmt.Sprintf("http://localhost:%d", port)
 	log.Printf("Starting web interface at %s\n", url)
 
-	openBrowser(url)
+	if openInBrowser {
+		openBrowser(url)
+	}
 
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
 		log.Fatal(err)
@@ -365,7 +398,14 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// CORS: Allow requests from localhost on any port (for desktop dev server)
+	origin := r.Header.Get("Origin")
+	if origin != "" && (strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:")) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
 
 	// Set status code before writing body

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -30,6 +29,7 @@ var (
 	httpToHttpsRedirection bool
 	configFile             string
 	dnsSetupMode           string
+	desktopMode            bool
 )
 
 var rootCmd = &cobra.Command{
@@ -38,6 +38,14 @@ var rootCmd = &cobra.Command{
 	Long: `A CLI tool to deploy self-hosted applications like OpenReplay, 
 OpenPanel, Plausible, and more to cloud providers like DigitalOcean, 
 Scaleway, and OVH with a single command.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// If --desktop flag is set, launch desktop app
+		if desktopMode {
+			return launchDesktop()
+		}
+		// Default: start web UI in browser
+		return server.Start(8080)
+	},
 }
 
 var deployCmd = &cobra.Command{
@@ -141,6 +149,9 @@ var setupSSLCmd = &cobra.Command{
 }
 
 func init() {
+	// Root command flags
+	rootCmd.Flags().BoolVar(&desktopMode, "desktop", false, "Launch desktop application instead of web UI")
+
 	// Deploy command flags
 	deployCmd.Flags().StringVarP(&providerName, "provider", "p", "", "Cloud provider (digitalocean, scaleway, ovh)")
 	deployCmd.Flags().StringVarP(&appName, "app", "a", "", "Application to deploy (openreplay, openpanel, plausible)")
@@ -188,13 +199,6 @@ func init() {
 }
 
 func Execute() error {
-	if len(os.Args) == 1 {
-		err := cli.RunWizard(deployWithOptions)
-		if err == cli.ErrStartWebUI {
-			return server.Start(8080)
-		}
-		return err
-	}
 	return rootCmd.Execute()
 }
 

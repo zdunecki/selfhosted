@@ -315,16 +315,8 @@ func (g *GCP) ListSizes() ([]Size, error) {
 
 func (g *GCP) GetSizeForSpecs(specs Specs) (string, error) {
 	sizes, _ := g.ListSizes()
-	var best *Size
-	for i := range sizes {
-		sz := &sizes[i]
-		if sz.VCPUs >= specs.CPUs && sz.MemoryMB >= specs.MemoryMB {
-			if best == nil || sz.VCPUs < best.VCPUs || (sz.VCPUs == best.VCPUs && sz.MemoryMB < best.MemoryMB) {
-				best = sz
-			}
-		}
-	}
-	if best == nil {
+	best, ok := pickBestSizeForSpecs(sizes, specs)
+	if !ok {
 		return "", fmt.Errorf("no GCP machine type found matching specs: %d CPUs, %dMB RAM", specs.CPUs, specs.MemoryMB)
 	}
 	return best.Slug, nil

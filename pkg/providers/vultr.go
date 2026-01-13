@@ -259,16 +259,9 @@ func (v *Vultr) GetSizeForSpecs(specs Specs) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var best *Size
-	for i := range sizes {
-		sz := &sizes[i]
-		if sz.VCPUs >= specs.CPUs && sz.MemoryMB >= specs.MemoryMB {
-			if best == nil || (best.PriceMonthly == 0 && sz.PriceMonthly > 0) || (sz.PriceMonthly > 0 && sz.PriceMonthly < best.PriceMonthly) {
-				best = sz
-			}
-		}
-	}
-	if best == nil {
+
+	best, ok := pickBestSizeForSpecs(sizes, specs)
+	if !ok {
 		return "", fmt.Errorf("no Vultr plan found matching specs: %d CPUs, %dMB RAM", specs.CPUs, specs.MemoryMB)
 	}
 	return best.Slug, nil

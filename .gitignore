@@ -2,3 +2,6 @@
 .env
 node_modules
 dist
+selfhosted
+desktop/bin
+desktop/.tmp

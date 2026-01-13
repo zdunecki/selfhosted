@@ -451,16 +451,8 @@ func (s *Scaleway) GetSizeForSpecs(specs Specs) (string, error) {
 		return "", err
 	}
 
-	var best *Size
-	for i := range sizes {
-		x := &sizes[i]
-		if x.VCPUs >= specs.CPUs && x.MemoryMB >= specs.MemoryMB {
-			if best == nil || x.PriceMonthly < best.PriceMonthly {
-				best = x
-			}
-		}
-	}
-	if best == nil {
+	best, ok := pickBestSizeForSpecs(sizes, specs)
+	if !ok {
 		return "", fmt.Errorf("no Scaleway instance type found matching specs: %d CPUs, %dMB RAM", specs.CPUs, specs.MemoryMB)
 	}
 	return best.Slug, nil

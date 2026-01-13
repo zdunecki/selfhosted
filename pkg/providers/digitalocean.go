@@ -136,21 +136,12 @@ func (d *DigitalOcean) GetSizeForSpecs(specs Specs) (string, error) {
 		return "", err
 	}
 
-	// Find the smallest size that meets the requirements
-	var bestSize *Size
-	for i, s := range sizes {
-		if s.VCPUs >= specs.CPUs && s.MemoryMB >= specs.MemoryMB {
-			if bestSize == nil || s.PriceMonthly < bestSize.PriceMonthly {
-				bestSize = &sizes[i]
-			}
-		}
-	}
-
-	if bestSize == nil {
+	best, ok := pickBestSizeForSpecs(sizes, specs)
+	if !ok {
 		return "", fmt.Errorf("no size found matching specs: %d CPUs, %dMB RAM", specs.CPUs, specs.MemoryMB)
 	}
 
-	return bestSize.Slug, nil
+	return best.Slug, nil
 }
 
 func (d *DigitalOcean) CreateServer(config *DeployConfig) (*Server, error) {

@@ -1,22 +1,22 @@
 package apps
 
 import (
-	"embed"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/zdunecki/selfhosted/pkg/dsl"
 	"gopkg.in/yaml.v3"
 )
 
-// apps.yaml + all referenced *.yaml live in this directory.
+// apps.yaml + all referenced *.yaml live in marketplace/ directory at the repo root.
 //
 // Adding a new basic app should require only:
-// - adding <app>.yaml next to apps.yaml
-// - listing it in apps.yaml
+// - adding <app>.yaml in marketplace/apps/
+// - listing it in marketplace/apps.yaml
 //
-//go:embed apps.yaml *.yaml
-var appsFS embed.FS
+// The marketplace directory is resolved relative to the executable or working directory.
 
 type appsList struct {
 	Apps []string `yaml:"apps"`
@@ -30,10 +30,43 @@ func init() {
 	}
 }
 
+func findMarketplaceDir() (string, error) {
+	// Try 1: Current working directory (for development)
+	if cwd, err := os.Getwd(); err == nil {
+		marketplaceDir := filepath.Join(cwd, "marketplace")
+		if _, err := os.Stat(filepath.Join(marketplaceDir, "apps.yaml")); err == nil {
+			return marketplaceDir, nil
+		}
+	}
+
+	// Try 2: Relative to executable (for production binaries)
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		// Try same directory as executable
+		marketplaceDir := filepath.Join(exeDir, "marketplace")
+		if _, err := os.Stat(filepath.Join(marketplaceDir, "apps.yaml")); err == nil {
+			return marketplaceDir, nil
+		}
+		// Try one level up (common for Go builds)
+		marketplaceDir = filepath.Join(exeDir, "..", "marketplace")
+		if _, err := os.Stat(filepath.Join(marketplaceDir, "apps.yaml")); err == nil {
+			return marketplaceDir, nil
+		}
+	}
+
+	return "", fmt.Errorf("marketplace directory not found (looked in cwd/marketplace and exe/marketplace)")
+}
+
 func registerAppsFromYAML() error {
-	data, err := appsFS.ReadFile("apps.yaml")
+	marketplaceDir, err := findMarketplaceDir()
 	if err != nil {
-		return fmt.Errorf("apps registry: read apps.yaml: %w", err)
+		return fmt.Errorf("apps registry: %w", err)
+	}
+
+	appsYAMLPath := filepath.Join(marketplaceDir, "apps.yaml")
+	data, err := os.ReadFile(appsYAMLPath)
+	if err != nil {
+		return fmt.Errorf("apps registry: read %s: %w", appsYAMLPath, err)
 	}
 
 	var list appsList
@@ -47,15 +80,17 @@ func registerAppsFromYAML() error {
 		return fmt.Errorf("apps registry: apps.yaml has no entries")
 	}
 
+	appsDir := filepath.Join(marketplaceDir, "apps")
 	for _, filename := range list.Apps {
 		filename = strings.TrimSpace(filename)
 		if filename == "" {
 			continue
 		}
 
-		appData, err := appsFS.ReadFile(filename)
+		appPath := filepath.Join(appsDir, filename)
+		appData, err := os.ReadFile(appPath)
 		if err != nil {
-			return fmt.Errorf("apps registry: read %s: %w", filename, err)
+			return fmt.Errorf("apps registry: read %s: %w", appPath, err)
 		}
 
 		spec, err := dsl.LoadSpec(appData)

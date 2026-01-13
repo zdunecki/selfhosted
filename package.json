@@ -1,0 +1,17 @@
+{
+  "name": "selfhosted-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "app",
+    "web",
+    "desktop/vite-src"
+  ],
+  "scripts": {
+    "build:app": "cd app && npm run build",
+    "build:web": "cd web && npm run build",
+    "build:desktop": "cd desktop/vite-src && npm run build",
+    "build": "npm run build:app && npm run build:web && npm run build:desktop && go build -o selfhosted -v",
+    "install:all": "npm install"
+  }
+}

@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@source "./**/*.{html,js,jsx,ts,tsx}";
+
+html,
+body {
+  background-color: #fafafa;
+  /* zinc-50 */
+  color: #18181b;
+  /* zinc-900 */
+}
+
+/* Desktop mode: prevent scrolling on html/body */
+body.desktop-mode,
+html.desktop-mode {
+  height: 100%;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+body.desktop-mode #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+@keyframes loading {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  50% {
+    transform: translateX(100%);
+  }
+
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+}

@@ -337,16 +337,8 @@ func (u *UpCloud) GetSizeForSpecs(specs Specs) (string, error) {
 		return "", err
 	}
 
-	var best *Size
-	for i := range sizes {
-		sz := &sizes[i]
-		if sz.VCPUs >= specs.CPUs && sz.MemoryMB >= specs.MemoryMB {
-			if best == nil || sz.PriceMonthly < best.PriceMonthly {
-				best = sz
-			}
-		}
-	}
-	if best == nil {
+	best, ok := pickBestSizeForSpecs(sizes, specs)
+	if !ok {
 		return "", fmt.Errorf("no UpCloud plan found matching specs: %d CPUs, %dMB RAM", specs.CPUs, specs.MemoryMB)
 	}
 	return best.Slug, nil
@@ -891,35 +883,6 @@ func upcloudPublicIPv4(details *upcloud.ServerDetails) string {
 		}
 	}
 	return ""
-}
-
-func sanitizeHostname(s string) string {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" {
-		return ""
-	}
-	// Keep simple: a-z0-9 and '-' only.
-	var b strings.Builder
-	lastDash := false
-	for _, r := range s {
-		isAZ := r >= 'a' && r <= 'z'
-		is09 := r >= '0' && r <= '9'
-		if isAZ || is09 {
-			b.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
-			b.WriteByte('-')
-			lastDash = true
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if len(out) > 63 {
-		out = out[:63]
-		out = strings.Trim(out, "-")
-	}
-	return out
 }
 
 func init() {
