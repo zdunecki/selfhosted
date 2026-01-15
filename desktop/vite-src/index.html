@@ -7,9 +7,9 @@
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-    <!-- Neutralino globals are served by Neutralino's internal server (port 3000 in neutralino.config.json) -->
+    <!-- Neutralino globals must be loaded first -->
     <script src="http://localhost:3000/__neutralino_globals.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
 

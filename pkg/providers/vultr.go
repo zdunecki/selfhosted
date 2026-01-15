@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vultr/govultr/v3"
+	"github.com/zdunecki/selfhosted/pkg/terraform"
 	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"
 )
@@ -35,6 +36,10 @@ type Vultr struct {
 
 	// cached OS id for Ubuntu
 	ubuntuOSID int
+
+	// Terraform state
+	tfServer  *Server
+	tfWorkDir string
 }
 
 func NewVultr() *Vultr {
@@ -283,11 +288,29 @@ func (v *Vultr) CreateServer(config *DeployConfig) (*Server, error) {
 		return nil, fmt.Errorf("vultr: plan is required")
 	}
 
+	// Get profile from env var (default: "basic")
+	profile := strings.TrimSpace(strings.ToLower(os.Getenv("SELFHOSTED_VULTR_PROFILE")))
+	if profile == "" {
+		profile = "basic"
+	}
+
+	moduleDir, err := terraform.FindModuleDir("vultr", profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find terraform module for vultr/%s: %w", profile, err)
+	}
+
+	env := v.terraformEnv()
+	if len(env) == 0 {
+		return nil, fmt.Errorf("VULTR_API_KEY is required")
+	}
+
+	// Ensure SSH key exists and get its ID
 	sshID, err := v.ensureSSHKey(c, config.SSHPublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("vultr: ssh key setup failed: %w", err)
 	}
 
+	// Get Ubuntu OS ID
 	osID, err := v.ensureUbuntuOSID(c)
 	if err != nil {
 		return nil, err
@@ -302,77 +325,74 @@ func (v *Vultr) CreateServer(config *DeployConfig) (*Server, error) {
 		host = "selfhosted"
 	}
 
-	req := &govultr.InstanceCreateReq{
-		Label:    label,
-		Hostname: host,
-		Region:   region,
-		Plan:     plan,
-		OsID:     osID,
-		// SSHKeys expects the ssh key IDs to attach.
-		SSHKeys: []string{sshID},
-		// Keep defaults; IPv6 is optional for our installer.
-		EnableIPv6: govultr.BoolToBoolPtr(false),
-		Tags:       config.Tags,
+	vars := map[string]interface{}{
+		"name":        label,
+		"hostname":    host,
+		"region":      region,
+		"plan":        plan,
+		"os_id":       osID,
+		"ssh_key_ids": []string{sshID},
+		"tags":        config.Tags,
 	}
 
-	inst, _, err := c.Instance.Create(v.ctx, req)
+	runID := fmt.Sprintf("%s-%d", label, time.Now().Unix())
+	result, err := terraform.Apply(v.ctx, moduleDir, runID, env, vars)
 	if err != nil {
-		return nil, err
-	}
-	if inst == nil || strings.TrimSpace(inst.ID) == "" {
-		return nil, fmt.Errorf("vultr: create instance returned empty id")
+		return nil, fmt.Errorf("terraform apply failed: %w", err)
 	}
 
-	return &Server{
-		ID:     inst.ID,
-		Name:   label,
-		Status: inst.Status,
-	}, nil
+	ip, _ := terraform.OutputString(result.Outputs, "instance_ip")
+	instanceID, _ := terraform.OutputString(result.Outputs, "instance_id")
+	instanceLabel, _ := terraform.OutputString(result.Outputs, "instance_label")
+	instanceStatus, _ := terraform.OutputString(result.Outputs, "instance_status")
+
+	if ip == "" {
+		return nil, fmt.Errorf("terraform apply succeeded but instance_ip output is empty")
+	}
+	if instanceID == "" {
+		return nil, fmt.Errorf("terraform apply succeeded but instance_id output is empty")
+	}
+
+	server := &Server{
+		ID:     instanceID,
+		Name:   instanceLabel,
+		IP:     ip,
+		Status: instanceStatus,
+	}
+
+	v.tfServer = server
+	v.tfWorkDir = result.WorkDir
+
+	return server, nil
 }
 
 func (v *Vultr) WaitForServer(id string) (*Server, error) {
-	c, err := v.ensureClient()
-	if err != nil {
-		return nil, err
-	}
-
-	id = strings.TrimSpace(id)
-	timeout := time.After(10 * time.Minute)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout:
-			return nil, fmt.Errorf("timeout waiting for Vultr server %s", id)
-		case <-ticker.C:
-			inst, _, err := c.Instance.Get(v.ctx, id)
-			if err != nil {
-				return nil, err
-			}
-			if inst == nil {
-				continue
-			}
-			ip := strings.TrimSpace(inst.MainIP)
-			if ip != "" {
-				_ = WaitForSSH(ip, 22)
-				return &Server{
-					ID:     id,
-					Name:   inst.Label,
-					IP:     ip,
-					Status: inst.Status,
-				}, nil
-			}
+	// Terraform creates servers synchronously, so the server is already ready
+	if v.tfServer != nil {
+		// Wait for SSH to be available
+		if v.tfServer.IP != "" {
+			_ = WaitForSSH(v.tfServer.IP, 22)
 		}
+		return v.tfServer, nil
 	}
+	// Fallback: return server with the provided ID (shouldn't happen in normal flow)
+	return &Server{
+		ID:     id,
+		Status: "active",
+	}, nil
 }
 
 func (v *Vultr) DestroyServer(id string) error {
-	c, err := v.ensureClient()
-	if err != nil {
-		return err
+	if v.tfWorkDir == "" {
+		return fmt.Errorf("terraform work directory not found for server %s", id)
 	}
-	return c.Instance.Delete(v.ctx, strings.TrimSpace(id))
+
+	env := v.terraformEnv()
+	if len(env) == 0 {
+		return fmt.Errorf("Vultr credentials not configured")
+	}
+
+	return terraform.Destroy(v.ctx, v.tfWorkDir, env)
 }
 
 func (v *Vultr) SetupDNS(domain, ip string) error {
@@ -529,6 +549,22 @@ func (v *Vultr) loadFromVultrCLIConfigFile() error {
 		return nil
 	}
 	return nil
+}
+
+func (v *Vultr) terraformEnv() map[string]string {
+	env := make(map[string]string)
+
+	// Check struct field first (populated by Configure or ensureClient)
+	if strings.TrimSpace(v.apiKey) != "" {
+		env["VULTR_API_KEY"] = v.apiKey
+	} else {
+		// Fallback to environment variable
+		if apiKey := strings.TrimSpace(os.Getenv("VULTR_API_KEY")); apiKey != "" {
+			env["VULTR_API_KEY"] = apiKey
+		}
+	}
+
+	return env
 }
 
 func init() {

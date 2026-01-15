@@ -1,25 +1,27 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	billing "cloud.google.com/go/billing/apiv1"
-	compute "cloud.google.com/go/compute/apiv1"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	serviceusage "cloud.google.com/go/serviceusage/apiv1"
+	"github.com/zdunecki/selfhosted/pkg/terraform"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	serviceusagepb "google.golang.org/genproto/googleapis/api/serviceusage/v1"
 	billingpb "google.golang.org/genproto/googleapis/cloud/billing/v1"
-	computepb "google.golang.org/genproto/googleapis/cloud/compute/v1"
 	resmgrpb "google.golang.org/genproto/googleapis/cloud/resourcemanager/v3"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/status"
@@ -46,6 +48,10 @@ type GCP struct {
 	parent          string // e.g. "organizations/123" or "folders/456" (optional)
 	billingAccount  string // e.g. "billingAccounts/0123-4567-89AB" (optional)
 	createProject   bool
+
+	// Terraform state
+	tfServer  *Server
+	tfWorkDir string
 }
 
 func NewGCP() *GCP {
@@ -344,35 +350,76 @@ func (g *GCP) CreateServer(config *DeployConfig) (*Server, error) {
 	}
 
 	projectID := strings.TrimSpace(g.projectID)
-	createdProject := false
 	if projectID == "" && !g.createProject {
 		return nil, fmt.Errorf("gcp: project_id is required when create_project=false (select an existing project in the wizard)")
 	}
 	if projectID == "" && g.createProject {
+		// Create project via API first (Terraform can't create projects without a project)
 		projectID, err = g.createProjectAndBilling(ts, config.Name)
 		if err != nil {
 			return nil, err
 		}
-		createdProject = true
+		// Update the projectID in the struct for Terraform
+		g.projectID = projectID
 	}
 	if projectID == "" {
 		return nil, fmt.Errorf("gcp: project_id is required (or enable create_project)")
 	}
 
-	// Ensure Compute API is enabled.
-	// For freshly-created projects it's typically disabled and may take time to propagate after enabling.
-	if createdProject {
-		if err := g.ensureServiceEnabled(ts, projectID, "compute.googleapis.com"); err != nil {
-			return nil, fmt.Errorf("gcp: failed to enable compute API for new project %s: %w", projectID, err)
-		}
-	} else {
-		// Best-effort for existing projects; if it's disabled we'll retry after a 403 below.
-		_ = g.ensureServiceEnabled(ts, projectID, "compute.googleapis.com")
+	// Use Terraform to create the instance
+	return g.createServerWithTerraform(config, projectID, zone, machineType, ts)
+}
+
+func (g *GCP) WaitForServer(id string) (*Server, error) {
+	// Terraform creates instances synchronously, so the server is already ready
+	if g.tfServer != nil {
+		return g.tfServer, nil
+	}
+	// Fallback: return server with the provided ID (shouldn't happen in normal flow)
+	return &Server{
+		ID:     id,
+		Status: "active",
+	}, nil
+}
+
+func (g *GCP) DestroyServer(id string) error {
+	if g.tfWorkDir == "" {
+		return fmt.Errorf("terraform work directory not found for server %s", id)
 	}
 
-	// Create firewall rules allowing SSH + HTTP/HTTPS (best-effort; required for ACME HTTP-01).
-	_ = g.ensureAllowSSH(ts, projectID)
-	_ = g.ensureAllowHTTPHTTPS(ts, projectID)
+	ts, _, err := g.ResolveAuth()
+	if err != nil {
+		return err
+	}
+
+	env := g.terraformEnv(ts)
+	if len(env) == 0 {
+		return fmt.Errorf("GCP credentials not configured")
+	}
+
+	return terraform.Destroy(g.ctx, g.tfWorkDir, env)
+}
+
+func (g *GCP) SetupDNS(domain, ip string) error {
+	return fmt.Errorf("gcp DNS is not supported in this installer yet; please create an A record for %s -> %s at your DNS provider", domain, ip)
+}
+
+func (g *GCP) createServerWithTerraform(config *DeployConfig, projectID, zone, machineType string, ts oauth2.TokenSource) (*Server, error) {
+	// Get profile from env var (default: "basic")
+	profile := strings.TrimSpace(strings.ToLower(os.Getenv("SELFHOSTED_GCP_PROFILE")))
+	if profile == "" {
+		profile = "basic"
+	}
+
+	moduleDir, err := terraform.FindModuleDir("gcp", profile)
+	if err != nil {
+		return nil, err
+	}
+
+	env := g.terraformEnv(ts)
+	if len(env) == 0 {
+		return nil, fmt.Errorf("GCP credentials not configured")
+	}
 
 	instName := sanitizeHostname(config.Name)
 	if instName == "" {
@@ -383,157 +430,67 @@ func (g *GCP) CreateServer(config *DeployConfig) (*Server, error) {
 		instName = instName[:55]
 	}
 
-	startup := buildGCPStartupScript(config.SSHPublicKey)
+	image := config.Image
+	if image == "" {
+		image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+	}
 
-	instancesClient, err := compute.NewInstancesRESTClient(g.ctx, option.WithTokenSource(ts))
+	vars := map[string]interface{}{
+		"project_id":     projectID,
+		"name":           instName,
+		"zone":           zone,
+		"machine_type":   machineType,
+		"image":          image,
+		"ssh_public_key": config.SSHPublicKey,
+		"tags":           config.Tags,
+	}
+
+	runID := fmt.Sprintf("%s-%d", instName, time.Now().Unix())
+	result, err := terraform.Apply(g.ctx, moduleDir, runID, env, vars)
 	if err != nil {
 		return nil, err
 	}
-	defer instancesClient.Close()
 
-	// Debian/Ubuntu images are referenced by another project.
-	sourceImage := "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+	ip, _ := terraform.OutputString(result.Outputs, "instance_ip")
+	instanceZone, _ := terraform.OutputString(result.Outputs, "instance_zone")
 
-	req := &computepb.InsertInstanceRequest{
-		Project: projectID,
-		Zone:    zone,
-		InstanceResource: &computepb.Instance{
-			Name:        &instName,
-			MachineType: ptr(fmt.Sprintf("zones/%s/machineTypes/%s", zone, machineType)),
-			Tags: &computepb.Tags{
-				Items: []string{"selfhosted"},
-			},
-			Disks: []*computepb.AttachedDisk{
-				{
-					AutoDelete: ptr(true),
-					Boot:       ptr(true),
-					Type:       ptr("PERSISTENT"),
-					InitializeParams: &computepb.AttachedDiskInitializeParams{
-						SourceImage: &sourceImage,
-						DiskSizeGb:  ptr(int64(25)),
-					},
-				},
-			},
-			NetworkInterfaces: []*computepb.NetworkInterface{
-				{
-					// Use default network.
-					Network: ptr("global/networks/default"),
-					AccessConfigs: []*computepb.AccessConfig{
-						{
-							Name: ptr("External NAT"),
-							Type: ptr("ONE_TO_ONE_NAT"),
-						},
-					},
-				},
-			},
-			Metadata: &computepb.Metadata{
-				Items: []*computepb.Items{
-					{Key: ptr("startup-script"), Value: &startup},
-				},
-			},
-		},
+	// Format ID as project/zone/name for consistency
+	serverID := fmt.Sprintf("%s/%s/%s", projectID, instanceZone, instName)
+
+	server := &Server{
+		ID:     serverID,
+		Name:   instName,
+		IP:     ip,
+		Status: "active",
 	}
 
-	op, err := instancesClient.Insert(g.ctx, req)
-	if err != nil {
-		// Common case for new projects: compute API enablement propagation lag.
-		if isComputeAPIDisabledErr(err) {
-			// Try enable + wait once, then retry insert.
-			if e2 := g.ensureServiceEnabled(ts, projectID, "compute.googleapis.com"); e2 == nil {
-				op, err = instancesClient.Insert(g.ctx, req)
-			}
-		}
-		if err != nil {
-			if createdProject {
-				// Don't auto-delete project; too risky. Provide hint.
-				return nil, fmt.Errorf("gcp: instance create failed (project=%s created=true): %w", projectID, err)
-			}
-			return nil, err
-		}
-	}
-	_ = op
+	g.tfServer = server
+	g.tfWorkDir = result.WorkDir
 
-	return &Server{
-		ID:     fmt.Sprintf("%s/%s/%s", projectID, zone, instName),
-		Name:   config.Name,
-		Status: "provisioning",
-	}, nil
+	return server, nil
 }
 
-func (g *GCP) WaitForServer(id string) (*Server, error) {
-	ts, method, err := g.ResolveAuth()
-	if err != nil {
-		return nil, err
-	}
-	_ = method
+func (g *GCP) terraformEnv(ts oauth2.TokenSource) map[string]string {
+	env := make(map[string]string)
 
-	projectID, zone, name, err := parseGCPServerID(id)
-	if err != nil {
-		return nil, err
+	// Set project
+	if g.projectID != "" {
+		env["GOOGLE_PROJECT"] = g.projectID
+		env["GOOGLE_CLOUD_PROJECT"] = g.projectID
 	}
 
-	instancesClient, err := compute.NewInstancesRESTClient(g.ctx, option.WithTokenSource(ts))
-	if err != nil {
-		return nil, err
+	// Handle credentials
+	if g.credentialsJSON != "" {
+		// Write credentials to a temp file and set GOOGLE_APPLICATION_CREDENTIALS
+		// For now, we'll pass it via env var (Terraform supports GOOGLE_CREDENTIALS)
+		env["GOOGLE_CREDENTIALS"] = g.credentialsJSON
+	} else {
+		// Use Application Default Credentials (ADC)
+		// Terraform will automatically use ADC if GOOGLE_APPLICATION_CREDENTIALS is not set
+		// and GOOGLE_CREDENTIALS is not set
 	}
-	defer instancesClient.Close()
 
-	timeout := time.After(12 * time.Minute)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout:
-			return nil, fmt.Errorf("timeout waiting for GCP instance %s", id)
-		case <-ticker.C:
-			inst, err := instancesClient.Get(g.ctx, &computepb.GetInstanceRequest{
-				Project:  projectID,
-				Zone:     zone,
-				Instance: name,
-			})
-			if err != nil {
-				return nil, err
-			}
-			ip := gcpExternalIPv4(inst)
-			if ip != "" {
-				_ = WaitForSSH(ip, 22)
-				return &Server{
-					ID:     id,
-					Name:   name,
-					IP:     ip,
-					Status: "running",
-				}, nil
-			}
-		}
-	}
-}
-
-func (g *GCP) DestroyServer(id string) error {
-	ts, method, err := g.ResolveAuth()
-	if err != nil {
-		return err
-	}
-	_ = method
-	projectID, zone, name, err := parseGCPServerID(id)
-	if err != nil {
-		return err
-	}
-	instancesClient, err := compute.NewInstancesRESTClient(g.ctx, option.WithTokenSource(ts))
-	if err != nil {
-		return err
-	}
-	defer instancesClient.Close()
-	_, err = instancesClient.Delete(g.ctx, &computepb.DeleteInstanceRequest{
-		Project:  projectID,
-		Zone:     zone,
-		Instance: name,
-	})
-	return err
-}
-
-func (g *GCP) SetupDNS(domain, ip string) error {
-	return fmt.Errorf("gcp DNS is not supported in this installer yet; please create an A record for %s -> %s at your DNS provider", domain, ip)
+	return env
 }
 
 func (g *GCP) createProjectAndBilling(ts oauth2.TokenSource, displayName string) (string, error) {
@@ -733,22 +690,6 @@ func (g *GCP) waitForServiceEnabled(ctx context.Context, ts oauth2.TokenSource, 
 	}
 }
 
-func isComputeAPIDisabledErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	// Heuristic based on the error message users see:
-	// "Compute Engine API has not been used in project ... before or it is disabled."
-	if strings.Contains(s, "Compute Engine API") && strings.Contains(s, "is disabled") {
-		return true
-	}
-	if strings.Contains(s, "compute.googleapis.com") && (strings.Contains(s, "has not been used") || strings.Contains(s, "is disabled")) {
-		return true
-	}
-	return false
-}
-
 func formatGCPError(err error) string {
 	if err == nil {
 		return ""
@@ -790,135 +731,55 @@ func formatGCPError(err error) string {
 	return msg
 }
 
-func (g *GCP) ensureAllowSSH(ts oauth2.TokenSource, projectID string) error {
-	// Best-effort: create firewall rule allowing TCP/22 to instances tagged "selfhosted" in default network.
-	fc, err := compute.NewFirewallsRESTClient(g.ctx, option.WithTokenSource(ts))
-	if err != nil {
-		return err
-	}
-	defer fc.Close()
-
-	name := "selfhosted-allow-ssh"
-	// Try get first; if exists, ok.
-	_, err = fc.Get(g.ctx, &computepb.GetFirewallRequest{Project: projectID, Firewall: name})
-	if err == nil {
-		return nil
-	}
-
-	net := "global/networks/default"
-	_, err = fc.Insert(g.ctx, &computepb.InsertFirewallRequest{
-		Project: projectID,
-		FirewallResource: &computepb.Firewall{
-			Name:         &name,
-			Network:      &net,
-			Direction:    ptr("INGRESS"),
-			SourceRanges: []string{"0.0.0.0/0"},
-			TargetTags:   []string{"selfhosted"},
-			Allowed: []*computepb.Allowed{
-				{IPProtocol: ptr("tcp"), Ports: []string{"22"}},
-			},
-		},
-	})
-	return err
+// gcloudTokenSource shells out to `gcloud auth print-access-token`.
+// This allows using a developer's gcloud user login without ADC.
+//
+// Notes:
+// - Tokens are short-lived; we assume ~1h and refresh proactively.
+// - This is a convenience fallback; production should prefer ADC or service accounts.
+type gcloudTokenSource struct {
+	mu  sync.Mutex
+	tok *oauth2.Token
 }
 
-func (g *GCP) ensureAllowHTTPHTTPS(ts oauth2.TokenSource, projectID string) error {
-	// Best-effort: allow TCP/80 and TCP/443 to instances tagged "selfhosted".
-	fc, err := compute.NewFirewallsRESTClient(g.ctx, option.WithTokenSource(ts))
-	if err != nil {
-		return err
-	}
-	defer fc.Close()
+func (s *gcloudTokenSource) Token() (*oauth2.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	name := "selfhosted-allow-web"
-	_, err = fc.Get(g.ctx, &computepb.GetFirewallRequest{Project: projectID, Firewall: name})
-	if err == nil {
-		return nil
+	// Reuse cached token if it’s still valid (with a small safety window).
+	if s.tok != nil && s.tok.Expiry.After(time.Now().Add(2*time.Minute)) {
+		return s.tok, nil
 	}
 
-	net := "global/networks/default"
-	_, err = fc.Insert(g.ctx, &computepb.InsertFirewallRequest{
-		Project: projectID,
-		FirewallResource: &computepb.Firewall{
-			Name:         &name,
-			Network:      &net,
-			Direction:    ptr("INGRESS"),
-			SourceRanges: []string{"0.0.0.0/0"},
-			TargetTags:   []string{"selfhosted"},
-			Allowed: []*computepb.Allowed{
-				{IPProtocol: ptr("tcp"), Ports: []string{"80", "443"}},
-			},
-		},
-	})
-	return err
-}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-func buildGCPStartupScript(sshPub string) string {
-	sshPub = strings.TrimSpace(sshPub)
-	// This is intentionally defensive and idempotent.
-	return fmt.Sprintf(`#!/bin/bash
-set -euo pipefail
-
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-touch /root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-
-grep -qF "%s" /root/.ssh/authorized_keys || echo "%s" >> /root/.ssh/authorized_keys
-
-if [ -f /etc/ssh/sshd_config ]; then
-  sed -i.bak 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || true
-  systemctl restart ssh || systemctl restart sshd || true
-fi
-`, sshPub, sshPub)
-}
-
-func parseGCPServerID(id string) (project string, zone string, name string, err error) {
-	id = strings.TrimSpace(id)
-	parts := strings.Split(id, "/")
-	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("gcp: invalid server id %q (expected project/zone/name)", id)
-	}
-	return parts[0], parts[1], parts[2], nil
-}
-
-func gcpExternalIPv4(inst *computepb.Instance) string {
-	if inst == nil {
-		return ""
-	}
-	for _, ni := range inst.NetworkInterfaces {
-		for _, ac := range ni.AccessConfigs {
-			if ac.NatIP != nil && strings.TrimSpace(*ac.NatIP) != "" {
-				return strings.TrimSpace(*ac.NatIP)
-			}
+	cmd := exec.CommandContext(ctx, "gcloud", "auth", "print-access-token")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
 		}
+		return nil, fmt.Errorf("gcloud auth print-access-token failed: %s", msg)
 	}
-	return ""
-}
 
-func ptr[T any](v T) *T { return &v }
-
-func min(a, b int) int {
-	if a < b {
-		return a
+	token := strings.TrimSpace(stdout.String())
+	if token == "" {
+		return nil, fmt.Errorf("gcloud returned empty access token")
 	}
-	return b
+
+	// gcloud access tokens are typically valid for 1 hour.
+	s.tok = &oauth2.Token{
+		AccessToken: token,
+		TokenType:   "Bearer",
+		Expiry:      time.Now().Add(55 * time.Minute),
+	}
+	return s.tok, nil
 }
 
 func init() {
 	Register(NewGCP())
-}
-
-// --- debug-only: validate credentials JSON structure early (helps UX) ---
-// Some users paste service account JSON; ensure it looks like JSON.
-func looksLikeJSON(s string) bool {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return false
-	}
-	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
-		return false
-	}
-	var tmp map[string]any
-	return json.Unmarshal([]byte(s), &tmp) == nil
 }

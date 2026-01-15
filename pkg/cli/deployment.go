@@ -88,18 +88,21 @@ func Deploy(opts DeployOptions, logf func(string, ...interface{})) error {
 	// Get provider
 	provider, err := providers.Get(opts.ProviderName)
 	if err != nil {
+		logf("❌ Provider error: %v\n", err)
 		return fmt.Errorf("provider error: %w", err)
 	}
 
 	// Get app
 	app, err := apps.Get(opts.AppName)
 	if err != nil {
+		logf("❌ App error: %v\n", err)
 		return fmt.Errorf("app error: %w", err)
 	}
 
 	// Load SSH keys
 	sshPrivate, sshPublic, err := LoadSSHKeys(opts.SSHKeyPath, opts.SSHPubKey)
 	if err != nil {
+		logf("❌ SSH key error: %v\n", err)
 		return fmt.Errorf("SSH key error: %w", err)
 	}
 
@@ -108,6 +111,7 @@ func Deploy(opts DeployOptions, logf func(string, ...interface{})) error {
 	if vmSize == "" {
 		vmSize, err = provider.GetSizeForSpecs(app.MinSpecs())
 		if err != nil {
+			logf("❌ Could not find suitable size: %v\n", err)
 			return fmt.Errorf("could not find suitable size: %w", err)
 		}
 	}
@@ -143,6 +147,7 @@ func Deploy(opts DeployOptions, logf func(string, ...interface{})) error {
 	logf("⏳ Creating server...\n")
 	server, err := provider.CreateServer(config)
 	if err != nil {
+		logf("❌ Server creation failed: %v\n", err)
 		return fmt.Errorf("failed to create server: %w", err)
 	}
 	logf("✅ Server created: %s (ID: %s)\n", server.Name, server.ID)
@@ -151,6 +156,7 @@ func Deploy(opts DeployOptions, logf func(string, ...interface{})) error {
 	logf("⏳ Waiting for server to be ready...\n")
 	server, err = provider.WaitForServer(server.ID)
 	if err != nil {
+		logf("❌ Server not ready: %v\n", err)
 		return fmt.Errorf("server not ready: %w", err)
 	}
 	logf("✅ Server ready with IP: %s\n", server.IP)

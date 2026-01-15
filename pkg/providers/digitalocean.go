@@ -2,6 +2,8 @@ package providers
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,12 +11,16 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
+	"github.com/zdunecki/selfhosted/pkg/terraform"
 	"golang.org/x/oauth2"
 )
 
 type DigitalOcean struct {
-	client *godo.Client
-	ctx    context.Context
+	client    *godo.Client
+	ctx       context.Context
+	token     string
+	tfServer  *Server
+	tfWorkDir string
 }
 
 func NewDigitalOcean() *DigitalOcean {
@@ -32,6 +38,7 @@ func (d *DigitalOcean) Configure(config map[string]string) error {
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	oauthClient := oauth2.NewClient(context.Background(), tokenSource)
 	d.client = godo.NewClient(oauthClient)
+	d.token = token
 	return nil
 }
 
@@ -76,6 +83,7 @@ func (d *DigitalOcean) ensureClient() error {
 		tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 		oauthClient := oauth2.NewClient(context.Background(), tokenSource)
 		d.client = godo.NewClient(oauthClient)
+		d.token = token
 		return nil
 	}
 
@@ -149,95 +157,107 @@ func (d *DigitalOcean) CreateServer(config *DeployConfig) (*Server, error) {
 		return nil, err
 	}
 
-	// Create or get SSH key
-	sshKeyID, err := d.ensureSSHKey(config.SSHPublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("SSH key setup failed: %w", err)
+	// Get profile from env var (default: "basic")
+	profile := strings.TrimSpace(strings.ToLower(os.Getenv("SELFHOSTED_DO_PROFILE")))
+	if profile == "" {
+		profile = "basic"
 	}
 
-	// Default image
+	moduleDir, err := terraform.FindModuleDir("digitalocean", profile)
+	if err != nil {
+		return nil, err
+	}
+
+	env := d.terraformEnv()
+	if len(env) == 0 {
+		return nil, fmt.Errorf("DIGITALOCEAN_TOKEN or DO_TOKEN environment variable required")
+	}
+
 	image := config.Image
 	if image == "" {
 		image = "ubuntu-22-04-x64"
 	}
 
-	createRequest := &godo.DropletCreateRequest{
-		Name:   config.Name,
-		Region: config.Region,
-		Size:   config.Size,
-		Image: godo.DropletCreateImage{
-			Slug: image,
-		},
-		SSHKeys: []godo.DropletCreateSSHKey{
-			{ID: sshKeyID},
-		},
-		Tags: config.Tags,
+	fingerprint, err := sshPublicKeyFingerprint(config.SSHPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute SSH key fingerprint: %w", err)
 	}
 
-	droplet, _, err := d.client.Droplets.Create(d.ctx, createRequest)
+	vars := map[string]interface{}{
+		"name":            config.Name,
+		"region":          config.Region,
+		"size":            config.Size,
+		"image":           image,
+		"ssh_public_key":  config.SSHPublicKey,
+		"ssh_fingerprint": fingerprint,
+		"tags":            config.Tags,
+	}
+
+	// Add volume_size for advanced profile
+	if profile == "advanced" {
+		volumeSize := 100 // default 100 GiB
+		if sizeStr := os.Getenv("SELFHOSTED_DO_VOLUME_SIZE"); sizeStr != "" {
+			if parsed, err := strconv.Atoi(sizeStr); err == nil && parsed > 0 {
+				volumeSize = parsed
+			}
+		}
+		vars["volume_size"] = volumeSize
+	}
+
+	runID := fmt.Sprintf("%s-%d", config.Name, time.Now().Unix())
+	result, err := terraform.Apply(d.ctx, moduleDir, runID, env, vars)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Server{
-		ID:     strconv.Itoa(droplet.ID),
-		Name:   droplet.Name,
-		Status: droplet.Status,
-	}, nil
+	ip, _ := terraform.OutputString(result.Outputs, "droplet_ipv4")
+	dropletID, _ := terraform.OutputString(result.Outputs, "droplet_id")
+
+	server := &Server{
+		ID:     dropletID,
+		Name:   config.Name,
+		IP:     ip,
+		Status: "active",
+	}
+
+	d.tfServer = server
+	d.tfWorkDir = result.WorkDir
+
+	return server, nil
 }
 
 func (d *DigitalOcean) WaitForServer(id string) (*Server, error) {
-	if err := d.ensureClient(); err != nil {
-		return nil, err
+	// Terraform creates servers synchronously, so the server is already ready
+	if d.tfServer != nil {
+		return d.tfServer, nil
 	}
-
-	dropletID, _ := strconv.Atoi(id)
-	timeout := time.After(5 * time.Minute)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout:
-			return nil, fmt.Errorf("timeout waiting for server %s", id)
-		case <-ticker.C:
-			droplet, _, err := d.client.Droplets.Get(d.ctx, dropletID)
-			if err != nil {
-				return nil, err
-			}
-
-			if droplet.Status == "active" {
-				ip := ""
-				for _, network := range droplet.Networks.V4 {
-					if network.Type == "public" {
-						ip = network.IPAddress
-						break
-					}
-				}
-
-				return &Server{
-					ID:     id,
-					Name:   droplet.Name,
-					IP:     ip,
-					Status: droplet.Status,
-				}, nil
-			}
-		}
-	}
+	// Fallback: return server with the provided ID (shouldn't happen in normal flow)
+	return &Server{
+		ID:     id,
+		Status: "active",
+	}, nil
 }
 
 func (d *DigitalOcean) DestroyServer(id string) error {
-	if err := d.ensureClient(); err != nil {
-		return err
+	if d.tfWorkDir == "" {
+		return fmt.Errorf("terraform work directory not found for server %s", id)
 	}
 
-	dropletID, err := strconv.Atoi(id)
-	if err != nil {
-		return fmt.Errorf("invalid server ID: %s", id)
+	env := d.terraformEnv()
+	if len(env) == 0 {
+		return fmt.Errorf("DIGITALOCEAN_TOKEN or DO_TOKEN environment variable required")
 	}
 
-	_, err = d.client.Droplets.Delete(d.ctx, dropletID)
-	return err
+	return terraform.Destroy(d.ctx, d.tfWorkDir, env)
+}
+
+func (d *DigitalOcean) terraformEnv() map[string]string {
+	if d.token == "" {
+		return nil
+	}
+	return map[string]string{
+		"DIGITALOCEAN_TOKEN": d.token,
+	}
 }
 
 func (d *DigitalOcean) SetupDNS(domain, ip string) error {
@@ -315,34 +335,6 @@ Option 2: Manual DNS configuration
 	return nil
 }
 
-func (d *DigitalOcean) ensureSSHKey(publicKey string) (int, error) {
-	// Check if key already exists
-	keys, _, err := d.client.Keys.List(d.ctx, &godo.ListOptions{PerPage: 100})
-	if err != nil {
-		return 0, err
-	}
-
-	// Check by fingerprint or name
-	for _, key := range keys {
-		if key.Name == "selfhost-key" {
-			return key.ID, nil
-		}
-	}
-
-	// Create new key
-	keyReq := &godo.KeyCreateRequest{
-		Name:      "selfhost-key",
-		PublicKey: publicKey,
-	}
-
-	key, _, err := d.client.Keys.Create(d.ctx, keyReq)
-	if err != nil {
-		return 0, err
-	}
-
-	return key.ID, nil
-}
-
 // Helper functions
 func getRootDomain(domain string) string {
 	parts := strings.Split(domain, ".")
@@ -358,6 +350,29 @@ func getSubdomain(domain string) string {
 		return strings.Join(parts[:len(parts)-2], ".")
 	}
 	return "@"
+}
+
+// sshPublicKeyFingerprint computes the MD5 fingerprint of an OpenSSH public key.
+// The format matches DigitalOcean's fingerprint format (e.g., "ab:cd:ef:...").
+func sshPublicKeyFingerprint(pubKey string) (string, error) {
+	pubKey = strings.TrimSpace(pubKey)
+	parts := strings.Fields(pubKey)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid SSH public key format")
+	}
+
+	keyData, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("failed to decode SSH public key: %w", err)
+	}
+
+	hash := md5.Sum(keyData)
+	fingerprint := make([]string, len(hash))
+	for i, b := range hash {
+		fingerprint[i] = fmt.Sprintf("%02x", b)
+	}
+
+	return strings.Join(fingerprint, ":"), nil
 }
 
 func init() {

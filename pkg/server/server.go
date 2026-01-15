@@ -555,14 +555,21 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
+		// Log error to backend logs for debugging
+		log.Printf("Deployment failed: %v", err)
+
 		// Check if client is still connected before sending error
 		select {
 		case <-ctx.Done():
 			// Client disconnected, don't send error
 			return
 		default:
-			if _, writeErr := fmt.Fprintf(w, "data: [SELFHOSTED::ERROR] %v\n\n", err); writeErr == nil {
+			// Send detailed error message to frontend
+			errorMsg := fmt.Sprintf("[SELFHOSTED::ERROR] %v", err)
+			if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", errorMsg); writeErr == nil {
 				flusher.Flush()
+			} else {
+				log.Printf("Failed to send error to client: %v", writeErr)
 			}
 		}
 	} else {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
+	"github.com/zdunecki/selfhosted/pkg/terraform"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,6 +42,10 @@ type Scaleway struct {
 	zone      scw.Zone
 
 	ctx context.Context
+
+	// Terraform state
+	tfServer  *Server
+	tfWorkDir string
 }
 
 func NewScaleway() *Scaleway {
@@ -473,6 +478,7 @@ func (s *Scaleway) CreateServer(config *DeployConfig) (*Server, error) {
 		return nil, fmt.Errorf("SCW_DEFAULT_PROJECT_ID (project_id) is required to create servers")
 	}
 
+	// Find image if not provided
 	image := config.Image
 	if strings.TrimSpace(image) == "" {
 		image, err = s.findUbuntuImageLabelOrID(api, zone)
@@ -481,119 +487,33 @@ func (s *Scaleway) CreateServer(config *DeployConfig) (*Server, error) {
 		}
 	}
 
-	dynamic := true
-	req := &instance.CreateServerRequest{
-		Zone:              zone,
-		Name:              config.Name,
-		CommercialType:    config.Size,
-		Image:             scw.StringPtr(image),
-		DynamicIPRequired: &dynamic,
-		Project:           scw.StringPtr(s.projectID),
-		Tags:              config.Tags,
-	}
-
-	resp, err := api.CreateServer(req)
-	if err != nil {
-		return nil, err
-	}
-
-	server := resp.Server
-	if server == nil {
-		return nil, fmt.Errorf("scaleway: create server returned nil server")
-	}
-
-	// Inject SSH key via cloud-init user-data, then ensure the instance boots with it.
-	if strings.TrimSpace(config.SSHPublicKey) != "" {
-		cloudInit := buildCloudInitWithSSHKey(config.SSHPublicKey)
-		if err := api.SetServerUserData(&instance.SetServerUserDataRequest{
-			Zone:     zone,
-			ServerID: server.ID,
-			Key:      "cloud-init",
-			Content:  strings.NewReader(cloudInit),
-		}); err != nil {
-			return nil, fmt.Errorf("scaleway: set cloud-init user-data: %w", err)
-		}
-	}
-
-	// Ensure running (or reboot to apply cloud-init when it was already running).
-	action := instance.ServerActionPoweron
-	if server.State == instance.ServerStateRunning {
-		action = instance.ServerActionReboot
-	}
-	dur := 5 * time.Minute
-	_ = api.ServerActionAndWait(&instance.ServerActionAndWaitRequest{
-		ServerID: server.ID,
-		Zone:     zone,
-		Action:   action,
-		Timeout:  &dur,
-	})
-
-	return &Server{
-		ID:     encodeScalewayID(zone, server.ID),
-		Name:   server.Name,
-		Status: server.State.String(),
-	}, nil
+	// Use Terraform to create the instance
+	return s.createServerWithTerraform(config, string(zone), image)
 }
 
 func (s *Scaleway) WaitForServer(id string) (*Server, error) {
-	api, err := s.ensureAPI()
-	if err != nil {
-		return nil, err
+	// Terraform creates servers synchronously, so the server is already ready
+	if s.tfServer != nil {
+		return s.tfServer, nil
 	}
-
-	zone, serverID, err := decodeScalewayID(id, s.zone)
-	if err != nil {
-		return nil, err
-	}
-
-	timeout := time.After(10 * time.Minute)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-timeout:
-			return nil, fmt.Errorf("timeout waiting for Scaleway server %s", id)
-		case <-ticker.C:
-			resp, err := api.GetServer(&instance.GetServerRequest{
-				Zone:     zone,
-				ServerID: serverID,
-			})
-			if err != nil {
-				return nil, err
-			}
-			if resp.Server == nil {
-				continue
-			}
-
-			ip := scalewayPublicIPv4(resp.Server)
-			if resp.Server.State == instance.ServerStateRunning && ip != "" {
-				// Wait for SSH to be reachable
-				_ = WaitForSSH(ip, 22)
-				return &Server{
-					ID:     id,
-					Name:   resp.Server.Name,
-					IP:     ip,
-					Status: resp.Server.State.String(),
-				}, nil
-			}
-		}
-	}
+	// Fallback: return server with the provided ID (shouldn't happen in normal flow)
+	return &Server{
+		ID:     id,
+		Status: "active",
+	}, nil
 }
 
 func (s *Scaleway) DestroyServer(id string) error {
-	api, err := s.ensureAPI()
-	if err != nil {
-		return err
+	if s.tfWorkDir == "" {
+		return fmt.Errorf("terraform work directory not found for server %s", id)
 	}
-	zone, serverID, err := decodeScalewayID(id, s.zone)
-	if err != nil {
-		return err
+
+	env := s.terraformEnv()
+	if len(env) == 0 {
+		return fmt.Errorf("Scaleway credentials not configured")
 	}
-	return api.DeleteServer(&instance.DeleteServerRequest{
-		Zone:     zone,
-		ServerID: serverID,
-	})
+
+	return terraform.Destroy(s.ctx, s.tfWorkDir, env)
 }
 
 func (s *Scaleway) SetupDNS(domain, ip string) error {
@@ -615,70 +535,43 @@ func (s *Scaleway) findUbuntuImageLabelOrID(api *instance.API, zone scw.Zone) (s
 		return "", fmt.Errorf("scaleway: list images: %w", err)
 	}
 
-	best := ""
+	// Try to derive image label from name, or use ID with zone prefix
+	bestLabel := ""
+	bestID := ""
 	for _, img := range resp.Images {
 		if img == nil {
 			continue
 		}
 		name := strings.ToLower(img.Name)
 		if strings.Contains(name, "24.04") || strings.Contains(name, "noble") {
-			best = img.ID
-			break
+			// Try to derive label from name (e.g., "Ubuntu 24.04" -> "ubuntu_noble")
+			if strings.Contains(name, "noble") {
+				bestLabel = "ubuntu_noble"
+				break
+			}
+			if bestID == "" {
+				// Use zone/id format for Terraform
+				bestID = fmt.Sprintf("%s/%s", zone, img.ID)
+			}
 		}
-		if best == "" && (strings.Contains(name, "22.04") || strings.Contains(name, "jammy")) {
-			best = img.ID
-		}
-	}
-	if best == "" {
-		return "", fmt.Errorf("scaleway: could not find a public Ubuntu image in zone %s; set provider image explicitly", zone)
-	}
-	return best, nil
-}
-
-func buildCloudInitWithSSHKey(pubKey string) string {
-	pubKey = strings.TrimSpace(pubKey)
-	// Simple cloud-init that adds the SSH key.
-	return fmt.Sprintf(`#cloud-config
-ssh_authorized_keys:
-  - %s
-`, pubKey)
-}
-
-func scalewayPublicIPv4(srv *instance.Server) string {
-	if srv == nil {
-		return ""
-	}
-	// Prefer the newer PublicIPs list.
-	for _, ip := range srv.PublicIPs {
-		if ip == nil {
-			continue
-		}
-		if ip.Family == instance.ServerIPIPFamilyInet && ip.Address != nil {
-			return ip.Address.String()
+		if bestLabel == "" && bestID == "" && (strings.Contains(name, "22.04") || strings.Contains(name, "jammy")) {
+			if strings.Contains(name, "jammy") {
+				bestLabel = "ubuntu_jammy"
+			} else if bestID == "" {
+				// Use zone/id format for Terraform
+				bestID = fmt.Sprintf("%s/%s", zone, img.ID)
+			}
 		}
 	}
-	// Fallback to deprecated PublicIP.
-	if srv.PublicIP != nil && srv.PublicIP.Address != nil {
-		return srv.PublicIP.Address.String()
-	}
-	return ""
-}
 
-func encodeScalewayID(zone scw.Zone, serverID string) string {
-	return fmt.Sprintf("%s:%s", string(zone), serverID)
-}
-
-func decodeScalewayID(id string, defaultZone scw.Zone) (scw.Zone, string, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", "", fmt.Errorf("empty server id")
+	// Prefer label over ID for Terraform compatibility
+	if bestLabel != "" {
+		return bestLabel, nil
 	}
-	parts := strings.SplitN(id, ":", 2)
-	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-		return scw.Zone(parts[0]), parts[1], nil
+	if bestID != "" {
+		return bestID, nil
 	}
-	// Backward-compat: treat as raw server UUID, assume default zone.
-	return defaultZone, id, nil
+	return "", fmt.Errorf("scaleway: could not find a public Ubuntu image in zone %s; set provider image explicitly", zone)
 }
 
 func humanZoneName(zone string) string {
@@ -699,6 +592,94 @@ func humanZoneName(zone string) string {
 	default:
 		return zone
 	}
+}
+
+func (s *Scaleway) createServerWithTerraform(config *DeployConfig, zone, imageID string) (*Server, error) {
+	// Get profile from env var (default: "basic")
+	profile := strings.TrimSpace(strings.ToLower(os.Getenv("SELFHOSTED_SCW_PROFILE")))
+	if profile == "" {
+		profile = "basic"
+	}
+
+	moduleDir, err := terraform.FindModuleDir("scaleway", profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find terraform module for scaleway/%s: %w", profile, err)
+	}
+
+	env := s.terraformEnv()
+	if len(env) == 0 {
+		return nil, fmt.Errorf("SCW_ACCESS_KEY and SCW_SECRET_KEY are required")
+	}
+
+	commercialType := config.Size
+	if commercialType == "" {
+		commercialType = "DEV1-S"
+	}
+
+	vars := map[string]interface{}{
+		"name":            config.Name,
+		"zone":            zone,
+		"commercial_type": commercialType,
+		"image_id":        imageID,
+		"project_id":      s.projectID,
+		"ssh_public_key":  config.SSHPublicKey,
+		"tags":            config.Tags,
+	}
+
+	runID := fmt.Sprintf("%s-%d", config.Name, time.Now().Unix())
+	result, err := terraform.Apply(s.ctx, moduleDir, runID, env, vars)
+	if err != nil {
+		return nil, fmt.Errorf("terraform apply failed: %w", err)
+	}
+
+	ip, _ := terraform.OutputString(result.Outputs, "server_ip")
+	serverID, _ := terraform.OutputString(result.Outputs, "server_id")
+	serverZone, _ := terraform.OutputString(result.Outputs, "server_zone")
+
+	if ip == "" {
+		return nil, fmt.Errorf("terraform apply succeeded but server_ip output is empty")
+	}
+	if serverID == "" {
+		return nil, fmt.Errorf("terraform apply succeeded but server_id output is empty")
+	}
+
+	// Format ID as zone:server_id for consistency
+	serverIDFormatted := fmt.Sprintf("%s:%s", serverZone, serverID)
+
+	server := &Server{
+		ID:     serverIDFormatted,
+		Name:   config.Name,
+		IP:     ip,
+		Status: "active",
+	}
+
+	s.tfServer = server
+	s.tfWorkDir = result.WorkDir
+
+	return server, nil
+}
+
+func (s *Scaleway) terraformEnv() map[string]string {
+	env := make(map[string]string)
+
+	// Set credentials
+	if s.accessKey != "" {
+		env["SCW_ACCESS_KEY"] = s.accessKey
+	}
+	if s.secretKey != "" {
+		env["SCW_SECRET_KEY"] = s.secretKey
+	}
+	if s.projectID != "" {
+		env["SCW_DEFAULT_PROJECT_ID"] = s.projectID
+	}
+	if s.orgID != "" {
+		env["SCW_DEFAULT_ORGANIZATION_ID"] = s.orgID
+	}
+	if string(s.zone) != "" {
+		env["SCW_DEFAULT_ZONE"] = string(s.zone)
+	}
+
+	return env
 }
 
 func init() {
