@@ -1,3 +1,5 @@
+
+
 # SelfHosted - Self-Hosted App Installer
 
 > ⚠️ **Early Stage**: This project is in very early development. Features may be incomplete, APIs may change, and there may be bugs. Use at your own risk.
@@ -67,7 +69,7 @@ sudo mv selfhosted /usr/local/bin/
 
 ```bash
 # Launch the native desktop application
-./selfhosted --desktop
+./selfhosted desktop
 ```
 
 The web UI provides an intuitive wizard interface to guide you through deploying your chosen application. Simply select your app, cloud provider, and follow the prompts!
